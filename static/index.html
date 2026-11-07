@@ -1,0 +1,1791 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>AGY Control Center — Multi-Account &amp; Quota Router</title>
+<style>
+  :root {
+    --bg-base: #09090b;
+    --bg-surface: #0d0d11;
+    --bg-elevated: #14141b;
+    --bg-hover: #191922;
+    --bg-active-row: rgba(16, 185, 129, 0.045);
+    --border-dim: #1c1c24;
+    --border-mid: #272732;
+    --border-bright: #383847;
+    --text-primary: #f3f4f6;
+    --text-secondary: #9ca3af;
+    --text-muted: #6b7280;
+    --emerald: #10b981;
+    --emerald-bg: rgba(16, 185, 129, 0.12);
+    --emerald-border: rgba(16, 185, 129, 0.32);
+    --amber: #f59e0b;
+    --amber-bg: rgba(245, 158, 11, 0.12);
+    --amber-border: rgba(245, 158, 11, 0.32);
+    --red: #ef4444;
+    --red-bg: rgba(239, 68, 68, 0.13);
+    --red-border: rgba(239, 68, 68, 0.32);
+    --blue: #3b82f6;
+    --blue-bg: rgba(59, 130, 246, 0.12);
+    --blue-border: rgba(59, 130, 246, 0.32);
+    --purple: #a855f7;
+    --purple-bg: rgba(168, 85, 247, 0.11);
+    --purple-border: rgba(168, 85, 247, 0.30);
+    --font-sans: -apple-system, BlinkMacSystemFont, "Inter", "Segoe UI", Roboto, sans-serif;
+    --font-mono: "JetBrains Mono", "Cascadia Code", "Fira Code", Consolas, monospace;
+  }
+
+  * {
+    box-sizing: border-box;
+    margin: 0;
+    padding: 0;
+  }
+
+  body {
+    background-color: var(--bg-base);
+    color: var(--text-primary);
+    font-family: var(--font-sans);
+    font-size: 12.5px;
+    line-height: 1.4;
+    min-height: 100vh;
+    display: flex;
+    flex-direction: column;
+    overflow-x: hidden;
+    -webkit-font-smoothing: antialiased;
+  }
+
+  /* Top Command Bar */
+  .topbar {
+    background: var(--bg-surface);
+    border-bottom: 1px solid var(--border-dim);
+    padding: 10px 18px;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+    flex-wrap: wrap;
+    position: sticky;
+    top: 0;
+    z-index: 50;
+  }
+
+  .brand {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    min-width: 0;
+  }
+
+  .brand-logo {
+    width: 28px;
+    height: 28px;
+    border-radius: 6px;
+    background: linear-gradient(135deg, #10b981 0%, #059669 100%);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-family: var(--font-mono);
+    font-weight: 800;
+    font-size: 11.5px;
+    color: #041d12;
+    flex-shrink: 0;
+  }
+
+  .brand-title {
+    font-size: 13.5px;
+    font-weight: 600;
+    letter-spacing: -0.01em;
+    color: var(--text-primary);
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    white-space: nowrap;
+  }
+
+  .brand-sub {
+    font-size: 11px;
+    color: var(--text-muted);
+    font-family: var(--font-mono);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+
+  .top-actions {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    flex-wrap: wrap;
+  }
+
+  /* Compact Studio Buttons */
+  .btn {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    gap: 5px;
+    height: 28px;
+    padding: 0 10px;
+    border-radius: 5px;
+    font-size: 11.5px;
+    font-weight: 500;
+    font-family: var(--font-sans);
+    background: var(--bg-elevated);
+    color: var(--text-primary);
+    border: 1px solid var(--border-mid);
+    cursor: pointer;
+    transition: background 0.12s ease, border-color 0.12s ease, color 0.12s ease;
+    user-select: none;
+    white-space: nowrap;
+    flex-shrink: 0;
+  }
+
+  .btn:hover {
+    background: var(--bg-hover);
+    border-color: var(--border-bright);
+  }
+
+  .btn:active {
+    transform: translateY(1px);
+  }
+
+  .btn-primary {
+    background: var(--emerald);
+    color: #041f14;
+    border-color: #10b981;
+    font-weight: 600;
+  }
+
+  .btn-primary:hover {
+    background: #34d399;
+    border-color: #34d399;
+  }
+
+  .btn-activate {
+    background: rgba(16, 185, 129, 0.12);
+    color: #34d399;
+    border-color: rgba(16, 185, 129, 0.35);
+    font-weight: 600;
+  }
+
+  .btn-activate:hover {
+    background: rgba(16, 185, 129, 0.22);
+    border-color: #10b981;
+  }
+
+  .btn-danger-icon {
+    width: 26px;
+    height: 26px;
+    padding: 0;
+    color: var(--text-muted);
+    border-color: var(--border-mid);
+    background: var(--bg-elevated);
+  }
+
+  .btn-danger-icon:hover {
+    color: #f87171;
+    border-color: rgba(239, 68, 68, 0.45);
+    background: rgba(239, 68, 68, 0.12);
+  }
+
+  .btn-sm {
+    height: 26px;
+    padding: 0 9px;
+    font-size: 11.5px;
+    border-radius: 5px;
+  }
+
+  .btn-active-toggle {
+    border-color: var(--emerald-border);
+    color: var(--emerald);
+    background: var(--emerald-bg);
+  }
+
+  .icon-btn {
+    background: transparent;
+    border: none;
+    color: var(--text-muted);
+    cursor: pointer;
+    padding: 2px;
+    border-radius: 4px;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    transition: color 0.12s, background 0.12s;
+  }
+
+  .icon-btn:hover {
+    color: var(--text-primary);
+    background: var(--bg-hover);
+  }
+
+  .spin {
+    animation: spin 0.8s linear infinite;
+  }
+
+  @keyframes spin {
+    100% { transform: rotate(360deg); }
+  }
+
+  /* Sub-navigation & Guard Strip */
+  .subbar {
+    background: var(--bg-surface);
+    border-bottom: 1px solid var(--border-dim);
+    padding: 0 18px;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    flex-wrap: wrap;
+    gap: 10px;
+  }
+
+  .tabs {
+    display: flex;
+    align-items: center;
+    gap: 2px;
+  }
+
+  .tab-btn {
+    background: transparent;
+    border: none;
+    border-bottom: 2px solid transparent;
+    color: var(--text-secondary);
+    padding: 9px 12px;
+    font-size: 12px;
+    font-weight: 500;
+    cursor: pointer;
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    white-space: nowrap;
+    transition: color 0.12s;
+  }
+
+  .tab-btn:hover {
+    color: var(--text-primary);
+  }
+
+  .tab-btn.active {
+    color: var(--emerald);
+    border-bottom-color: var(--emerald);
+    font-weight: 600;
+  }
+
+  .tab-count {
+    font-family: var(--font-mono);
+    font-size: 10px;
+    padding: 1px 5px;
+    border-radius: 999px;
+    background: var(--bg-elevated);
+    border: 1px solid var(--border-mid);
+    color: var(--text-secondary);
+  }
+
+  .guard-toggles {
+    display: flex;
+    align-items: center;
+    gap: 14px;
+    padding: 5px 0;
+    flex-wrap: wrap;
+  }
+
+  .toggle-label {
+    display: inline-flex;
+    align-items: center;
+    gap: 5px;
+    font-size: 11.5px;
+    color: var(--text-secondary);
+    cursor: pointer;
+    user-select: none;
+    white-space: nowrap;
+  }
+
+  .toggle-label input {
+    accent-color: var(--emerald);
+    width: 13px;
+    height: 13px;
+    cursor: pointer;
+  }
+
+  /* Main Container */
+  .main {
+    flex: 1;
+    padding: 14px 18px 28px;
+    max-width: 1480px;
+    width: 100%;
+    margin: 0 auto;
+  }
+
+  /* OAuth Waiting Banner */
+  .oauth-banner {
+    display: none;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+    background: var(--blue-bg);
+    border: 1px solid var(--blue-border);
+    padding: 9px 14px;
+    border-radius: 7px;
+    margin-bottom: 12px;
+    color: #93c5fd;
+    font-size: 12px;
+  }
+
+  .oauth-banner.show {
+    display: flex;
+  }
+
+  /* Accounts Table Card — Matches Reference Image Proportion & Density */
+  .table-card {
+    background: var(--bg-surface);
+    border: 1px solid var(--border-dim);
+    border-radius: 8px;
+    overflow-x: auto;
+    box-shadow: 0 10px 30px rgba(0, 0, 0, 0.45);
+  }
+
+  table.accounts-table {
+    width: 100%;
+    border-collapse: collapse;
+    text-align: left;
+    table-layout: auto;
+  }
+
+  table.accounts-table thead th {
+    background: #0a0a0d;
+    border-bottom: 1px solid var(--border-dim);
+    padding: 9px 12px;
+    font-size: 10.5px;
+    font-weight: 600;
+    letter-spacing: 0.05em;
+    text-transform: uppercase;
+    color: var(--text-muted);
+    white-space: nowrap;
+    user-select: none;
+  }
+
+  table.accounts-table tbody tr.account-row {
+    border-bottom: 1px solid var(--border-dim);
+    transition: background-color 0.1s ease;
+  }
+
+  table.accounts-table tbody tr.account-row:hover {
+    background-color: rgba(255, 255, 255, 0.015);
+  }
+
+  table.accounts-table tbody tr.account-row.active-account {
+    background-color: var(--bg-active-row);
+    box-shadow: inset 2px 0 0 var(--emerald);
+  }
+
+  table.accounts-table td {
+    padding: 12px;
+    vertical-align: top;
+  }
+
+  /* Column 1: Checkbox */
+  .col-check {
+    width: 34px;
+    padding-right: 2px !important;
+  }
+
+  .row-checkbox {
+    width: 14px;
+    height: 14px;
+    accent-color: var(--emerald);
+    cursor: pointer;
+    margin-top: 2px;
+  }
+
+  /* Column 2: ACCOUNT */
+  .col-account {
+    width: 240px;
+    min-width: 195px;
+    max-width: 280px;
+  }
+
+  .acc-header {
+    display: flex;
+    align-items: flex-start;
+    gap: 6px;
+  }
+
+  .expand-arrow {
+    background: transparent;
+    border: none;
+    color: var(--text-muted);
+    cursor: pointer;
+    font-size: 10px;
+    padding: 2px 4px;
+    margin-top: 1px;
+    transition: transform 0.14s ease, color 0.14s;
+    flex-shrink: 0;
+  }
+
+  .expand-arrow:hover {
+    color: var(--text-primary);
+  }
+
+  .expand-arrow.open {
+    transform: rotate(90deg);
+    color: var(--emerald);
+  }
+
+  .acc-title-wrap {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+    min-width: 0;
+  }
+
+  .acc-title {
+    font-size: 13px;
+    font-weight: 600;
+    color: var(--text-primary);
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    white-space: nowrap;
+  }
+
+  .acc-email {
+    font-family: var(--font-mono);
+    font-size: 11.5px;
+    color: #d1d5db;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    max-width: 230px;
+  }
+
+  .acc-sub {
+    font-size: 11.5px;
+    color: var(--text-muted);
+    white-space: nowrap;
+  }
+
+  .acc-badges {
+    display: flex;
+    align-items: center;
+    gap: 5px;
+    margin-top: 4px;
+    flex-wrap: nowrap;
+  }
+
+  /* Badges — Strictly Single Line */
+  .badge {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    padding: 2px 7px;
+    border-radius: 999px;
+    font-size: 10.5px;
+    font-weight: 600;
+    line-height: 1.3;
+    white-space: nowrap;
+    flex-shrink: 0;
+  }
+
+  .badge-verified {
+    background: var(--emerald-bg);
+    color: var(--emerald);
+    border: 1px solid var(--emerald-border);
+  }
+
+  .badge-enabled {
+    background: var(--emerald-bg);
+    color: var(--emerald);
+    border: 1px solid var(--emerald-border);
+    padding: 2px 9px;
+    font-size: 11px;
+  }
+
+  .badge-active-ide {
+    background: rgba(16, 185, 129, 0.20);
+    color: #6ee7b7;
+    border: 1px solid rgba(16, 185, 129, 0.55);
+    font-size: 9.5px;
+    padding: 1px 6px;
+    border-radius: 4px;
+    letter-spacing: 0.03em;
+  }
+
+  .badge-plan {
+    background: var(--purple-bg);
+    color: #d8b4fe;
+    border: 1px solid var(--purple-border);
+    font-family: var(--font-mono);
+    border-radius: 5px;
+    padding: 2px 8px;
+    font-size: 11px;
+  }
+
+  .badge-error {
+    background: var(--red-bg);
+    color: var(--red);
+    border: 1px solid var(--red-border);
+  }
+
+  .badge-new {
+    font-size: 9px;
+    font-family: var(--font-mono);
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+    padding: 0px 5px;
+    border-radius: 3px;
+    background: rgba(16, 185, 129, 0.18);
+    color: #34d399;
+    border: 1px solid rgba(16, 185, 129, 0.4);
+    white-space: nowrap;
+  }
+
+  /* Column 3 & 4: STATUS & PLAN */
+  .col-status {
+    width: 90px;
+    white-space: nowrap;
+  }
+
+  .col-plan {
+    width: 115px;
+    white-space: nowrap;
+  }
+
+  /* Column 5: USAGE (Unified Reference Style — Argon #1 + Exact Quota Windows, Zero Wrap) */
+  .col-usage {
+    width: 340px;
+    min-width: 280px;
+    max-width: 420px;
+  }
+
+  .usage-sync-row {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    font-size: 11px;
+    color: var(--text-muted);
+    margin-bottom: 6px;
+    white-space: nowrap;
+  }
+
+  .quota-window {
+    margin-bottom: 7px;
+  }
+
+  .quota-window.argon-featured {
+    background: rgba(255, 255, 255, 0.02);
+    border: 1px solid rgba(255, 255, 255, 0.06);
+    border-radius: 6px;
+    padding: 6px 8px;
+    margin-bottom: 8px;
+  }
+
+  .qw-top {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 8px;
+    font-size: 12px;
+    margin-bottom: 3px;
+    white-space: nowrap;
+  }
+
+  .qw-name {
+    color: var(--text-primary);
+    font-weight: 500;
+    display: inline-flex;
+    align-items: center;
+    gap: 5px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .qw-pct {
+    font-family: var(--font-mono);
+    font-size: 11.5px;
+    font-weight: 600;
+    white-space: nowrap;
+    flex-shrink: 0;
+  }
+
+  .qw-pct.green { color: var(--emerald); }
+  .qw-pct.amber { color: var(--amber); }
+  .qw-pct.red   { color: var(--red); }
+
+  .qw-bar-track {
+    width: 100%;
+    height: 3.5px;
+    background: #22222b;
+    border-radius: 2px;
+    overflow: hidden;
+    margin-bottom: 3px;
+  }
+
+  .qw-bar-fill {
+    height: 100%;
+    border-radius: 2px;
+    transition: width 0.3s ease;
+  }
+
+  .qw-bar-fill.green { background: var(--emerald); }
+  .qw-bar-fill.amber { background: var(--amber); }
+  .qw-bar-fill.red   { background: var(--red); }
+
+  .qw-bottom {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 8px;
+    font-size: 10.5px;
+    color: var(--text-muted);
+    font-family: var(--font-mono);
+    white-space: nowrap;
+  }
+
+  .qw-bottom-left {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .qw-bottom-right {
+    flex-shrink: 0;
+    white-space: nowrap;
+  }
+
+  .more-windows-link {
+    display: inline-block;
+    margin-top: 2px;
+    font-size: 11px;
+    color: var(--text-secondary);
+    text-decoration: underline;
+    text-underline-offset: 2px;
+    cursor: pointer;
+    background: none;
+    border: none;
+    padding: 0;
+    white-space: nowrap;
+  }
+
+  .more-windows-link:hover {
+    color: var(--text-primary);
+  }
+
+  .usage-footer-note {
+    margin-top: 4px;
+    font-size: 10.5px;
+    color: var(--text-muted);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+
+  /* Column 6: POOL / CREDITS */
+  .col-credits {
+    width: 130px;
+    min-width: 115px;
+    font-family: var(--font-mono);
+    white-space: nowrap;
+  }
+
+  .credit-main {
+    font-size: 12px;
+    font-weight: 600;
+    color: var(--text-primary);
+    white-space: nowrap;
+  }
+
+  .credit-sub {
+    font-size: 10.5px;
+    color: var(--text-muted);
+    margin-top: 2px;
+    white-space: nowrap;
+  }
+
+  /* Column 7: ACTIONS */
+  .col-actions {
+    width: 135px;
+    text-align: right;
+    white-space: nowrap;
+  }
+
+  .action-group {
+    display: inline-flex;
+    align-items: center;
+    gap: 5px;
+    justify-content: flex-end;
+    white-space: nowrap;
+  }
+
+  /* Expanded Per-Model Breakdown Drawer */
+  tr.models-drawer-row {
+    background: #0a0a0e;
+    border-bottom: 1px solid var(--border-dim);
+  }
+
+  .models-drawer {
+    padding: 14px 18px 16px 40px;
+  }
+
+  .models-drawer-title {
+    font-size: 11px;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    color: var(--text-secondary);
+    margin-bottom: 10px;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    flex-wrap: wrap;
+    gap: 8px;
+  }
+
+  .models-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(235px, 1fr));
+    gap: 8px;
+  }
+
+  .model-card {
+    background: var(--bg-elevated);
+    border: 1px solid var(--border-dim);
+    border-radius: 6px;
+    padding: 8px 10px;
+    overflow: hidden;
+  }
+
+  .model-card.argon-highlight {
+    border-color: rgba(16, 185, 129, 0.4);
+    background: linear-gradient(145deg, rgba(16, 185, 129, 0.08) 0%, var(--bg-elevated) 100%);
+  }
+
+  .model-card-top {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 6px;
+    margin-bottom: 5px;
+    white-space: nowrap;
+  }
+
+  .model-name {
+    font-size: 11.5px;
+    font-weight: 600;
+    color: var(--text-primary);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  /* Table Footer */
+  .table-footer {
+    background: #0a0a0d;
+    padding: 9px 14px;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    color: var(--text-muted);
+    font-size: 11.5px;
+    flex-wrap: wrap;
+    gap: 8px;
+  }
+
+  /* Workspaces & Snapshots Grid Views */
+  .grid-2 {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(340px, 1fr));
+    gap: 14px;
+  }
+
+  .panel-card {
+    background: var(--bg-surface);
+    border: 1px solid var(--border-dim);
+    border-radius: 8px;
+    padding: 15px 16px;
+  }
+
+  .panel-title {
+    font-size: 13px;
+    font-weight: 600;
+    margin-bottom: 4px;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+  }
+
+  .panel-desc {
+    font-size: 11.5px;
+    color: var(--text-muted);
+    margin-bottom: 12px;
+  }
+
+  .item-list {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    max-height: 420px;
+    overflow-y: auto;
+  }
+
+  .list-item {
+    background: var(--bg-elevated);
+    border: 1px solid var(--border-dim);
+    border-radius: 6px;
+    padding: 8px 11px;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 10px;
+  }
+
+  .list-item-title {
+    font-size: 12px;
+    font-weight: 600;
+    color: var(--text-primary);
+  }
+
+  .list-item-sub {
+    font-size: 11px;
+    font-family: var(--font-mono);
+    color: var(--text-muted);
+    margin-top: 2px;
+    word-break: break-all;
+  }
+
+  /* Modal */
+  .modal-backdrop {
+    position: fixed;
+    inset: 0;
+    background: rgba(0, 0, 0, 0.72);
+    backdrop-filter: blur(3px);
+    display: none;
+    align-items: center;
+    justify-content: center;
+    z-index: 100;
+  }
+
+  .modal-backdrop.open {
+    display: flex;
+  }
+
+  .modal {
+    background: var(--bg-surface);
+    border: 1px solid var(--border-mid);
+    border-radius: 10px;
+    width: 100%;
+    max-width: 460px;
+    padding: 18px 20px;
+    box-shadow: 0 25px 60px rgba(0, 0, 0, 0.75);
+  }
+
+  .modal h3 {
+    font-size: 14px;
+    margin-bottom: 5px;
+  }
+
+  .modal p {
+    font-size: 11.5px;
+    color: var(--text-secondary);
+    margin-bottom: 12px;
+  }
+
+  .input-field {
+    width: 100%;
+    background: #08080a;
+    border: 1px solid var(--border-mid);
+    color: var(--text-primary);
+    font-family: var(--font-mono);
+    font-size: 11.5px;
+    padding: 8px 10px;
+    border-radius: 5px;
+    margin-bottom: 12px;
+    outline: none;
+  }
+
+  .input-field:focus {
+    border-color: var(--emerald);
+  }
+
+  /* Toast Notification */
+  .toast-wrap {
+    position: fixed;
+    bottom: 16px;
+    right: 18px;
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    z-index: 200;
+  }
+
+  .toast {
+    background: #14141b;
+    border: 1px solid var(--border-bright);
+    border-left: 3px solid var(--emerald);
+    color: var(--text-primary);
+    padding: 8px 13px;
+    border-radius: 6px;
+    font-size: 12px;
+    box-shadow: 0 12px 30px rgba(0,0,0,0.6);
+    animation: slideIn 0.16s ease-out;
+  }
+
+  @keyframes slideIn {
+    from { transform: translateY(10px); opacity: 0; }
+    to { transform: translateY(0); opacity: 1; }
+  }
+
+  /* Responsive Adaptations for Compact / Split-Screen Windows */
+  @media (max-width: 960px) {
+    .col-credits {
+      display: none;
+    }
+    .col-plan {
+      display: none;
+    }
+    .col-usage {
+      min-width: 230px;
+    }
+  }
+
+  @media (max-width: 720px) {
+    .col-status {
+      display: none;
+    }
+    .topbar, .subbar, .main {
+      padding-left: 12px;
+      padding-right: 12px;
+    }
+    .models-drawer {
+      padding-left: 14px;
+    }
+  }
+</style>
+</head>
+<body>
+
+  <!-- Top Header -->
+  <header class="topbar">
+    <div class="brand">
+      <div class="brand-logo">AGY</div>
+      <div>
+        <div class="brand-title">
+          Antigravity Account &amp; Quota Hub
+          <span class="badge badge-verified" id="lsStatusBadge">LS Connected</span>
+        </div>
+        <div class="brand-sub" id="activeCredBanner">WinCred Target: gemini:antigravity</div>
+      </div>
+    </div>
+
+    <div class="top-actions">
+      <button class="btn btn-primary" onclick="startGoogleOAuth()">
+        <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.6"><line x1="12" y1="5" x2="12" y2="19"></line><line x1="5" y1="12" x2="19" y2="12"></line></svg>
+        Add Account
+      </button>
+      <button class="btn" onclick="openImportModal()">
+        Import Token
+      </button>
+      <button class="btn" id="pollAllBtn" onclick="refreshAllAccounts()">
+        <svg id="pollAllIcon" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><path d="M21 2v6h-6"></path><path d="M3 12a9 9 0 0 1 15-6.7L21 8"></path><path d="M3 22v-6h6"></path><path d="M21 12a9 9 0 0 1-15 6.7L3 16"></path></svg>
+        Poll All
+      </button>
+      <button class="btn" onclick="createManualSnapshot()">
+        Snapshot
+      </button>
+      <button class="btn" id="privacyToggleBtn" onclick="togglePrivacyMode()" title="Mask email addresses and personal names for screenshots or streaming">
+        <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"></path><circle cx="12" cy="12" r="3"></circle></svg>
+        <span id="privacyToggleLabel">Privacy</span>
+      </button>
+    </div>
+  </header>
+
+  <!-- Subbar Navigation & Session Protection Toggles -->
+  <div class="subbar">
+    <div class="tabs">
+      <button class="tab-btn active" id="tabBtn-accounts" onclick="switchTab('accounts')">
+        Accounts &amp; Usage
+        <span class="tab-count" id="countAccounts">0</span>
+      </button>
+      <button class="tab-btn" id="tabBtn-workspaces" onclick="switchTab('workspaces')">
+        Workspaces &amp; Sessions
+        <span class="tab-count" id="countWorkspaces">0</span>
+      </button>
+      <button class="tab-btn" id="tabBtn-snapshots" onclick="switchTab('snapshots')">
+        Snapshots Vault
+        <span class="tab-count" id="countSnapshots">0</span>
+      </button>
+    </div>
+
+    <div class="guard-toggles">
+      <label class="toggle-label" title="Keep all project folders, window layouts, and conversation history intact when switching accounts">
+        <input type="checkbox" id="chkPinWorkspaces" checked onchange="saveSettings()">
+        Pin Workspaces
+      </label>
+      <label class="toggle-label" title="Automatically create a recovery snapshot before every account switch">
+        <input type="checkbox" id="chkAutoSnap" checked onchange="saveSettings()">
+        Auto-Snapshot
+      </label>
+      <label class="toggle-label" title="Restart language_server.exe after switching credentials so the IDE immediately picks up the new account">
+        <input type="checkbox" id="chkHotReloadLS" onchange="saveSettings()">
+        Hot-Reload LS
+      </label>
+    </div>
+  </div>
+
+  <!-- Main Workspace -->
+  <main class="main">
+
+    <!-- OAuth Waiting Banner -->
+    <div class="oauth-banner" id="oauthBanner">
+      <div style="display:flex;align-items:center;gap:8px;">
+        <svg class="spin" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><path d="M21 12a9 9 0 1 1-6.219-8.56"></path></svg>
+        <span id="oauthBannerText">Waiting for Google OAuth sign-in in browser... Complete login to automatically import account &amp; model quotas.</span>
+      </div>
+      <div style="display:flex;gap:6px;">
+        <button class="btn btn-sm" id="oauthCopyUrlBtn">Copy URL</button>
+        <button class="btn btn-sm" onclick="cancelOAuthPoll()">Dismiss</button>
+      </div>
+    </div>
+
+    <!-- TAB 1: ACCOUNTS & QUOTAS TABLE -->
+    <section id="view-accounts">
+      <div class="table-card">
+        <table class="accounts-table">
+          <thead>
+            <tr>
+              <th class="col-check"><input type="checkbox" class="row-checkbox" onclick="toggleSelectAll(this)"></th>
+              <th class="col-account">ACCOUNT</th>
+              <th class="col-status">STATUS</th>
+              <th class="col-plan">PLAN</th>
+              <th class="col-usage">USAGE</th>
+              <th class="col-credits">POOL / CREDITS</th>
+              <th class="col-actions">ACTIONS</th>
+            </tr>
+          </thead>
+          <tbody id="accountsTableBody">
+            <tr>
+              <td colspan="7" style="text-align:center;padding:38px;color:var(--text-muted);">
+                Loading accounts and live model telemetry...
+              </td>
+            </tr>
+          </tbody>
+        </table>
+        <div class="table-footer">
+          <div id="tableFooterCount">0 accounts</div>
+          <div style="display:flex;align-items:center;gap:10px;">
+            <span>Direct CloudCode + Local ConnectRPC Telemetry</span>
+            <span>·</span>
+            <span>per page <select style="background:#14141a;color:#e5e7eb;border:1px solid #2a2a35;border-radius:4px;padding:1px 5px;font-size:11px;"><option>20</option><option>50</option></select></span>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- TAB 2: PINNED WORKSPACES & SESSIONS -->
+    <section id="view-workspaces" style="display:none;">
+      <div class="grid-2">
+        <div class="panel-card">
+          <div class="panel-title">
+            <span>Saved Project Workspaces</span>
+            <span class="badge badge-verified">Pinned Across Accounts</span>
+          </div>
+          <div class="panel-desc">Stored in <code>~/.gemini/config/projects/*.json</code> and preserved on every account switch.</div>
+          <div class="item-list" id="projectsList"></div>
+        </div>
+
+        <div class="panel-card">
+          <div class="panel-title">
+            <span>Recent Agent Conversations</span>
+            <span class="tab-count" id="convTotalBadge">0</span>
+          </div>
+          <div class="panel-desc">Live sessions indexed in <code>~/.gemini/antigravity/conversation_summaries.db</code>.</div>
+          <div class="item-list" id="conversationsList"></div>
+        </div>
+
+        <div class="panel-card">
+          <div class="panel-title">
+            <span>Configured MCP Servers</span>
+            <span class="tab-count" id="mcpTotalBadge">0</span>
+          </div>
+          <div class="panel-desc">Loaded from <code>~/.gemini/config/mcp_config.json</code>.</div>
+          <div class="item-list" id="mcpList"></div>
+        </div>
+
+        <div class="panel-card">
+          <div class="panel-title">
+            <span>Instance &amp; User Settings</span>
+          </div>
+          <div class="panel-desc">Global flags in <code>config.json</code> and <code>app_storage.json</code>.</div>
+          <div class="item-list" id="settingsList"></div>
+        </div>
+      </div>
+    </section>
+
+    <!-- TAB 3: INSTANCE SNAPSHOTS VAULT -->
+    <section id="view-snapshots" style="display:none;">
+      <div class="panel-card">
+        <div class="panel-title">
+          <span>Workspace, Layout &amp; Settings Snapshots</span>
+          <button class="btn btn-primary btn-sm" onclick="createManualSnapshot()">+ Create Snapshot Now</button>
+        </div>
+        <div class="panel-desc">
+          Every snapshot archives your <code>projects/*.json</code>, <code>app_storage.json</code> (window layouts &amp; open tabs), <code>config.json</code>, <code>mcp_config.json</code>, and <code>antigravity_state.pbtxt</code>. Restoring a snapshot brings back all workspaces without logging you out.
+        </div>
+        <div class="item-list" id="snapshotsList" style="max-height:520px;"></div>
+      </div>
+    </section>
+
+  </main>
+
+  <!-- Import Refresh Token Modal -->
+  <div class="modal-backdrop" id="importModal">
+    <div class="modal">
+      <h3>Import Account via OAuth Refresh Token</h3>
+      <p>Paste an Antigravity or Google OAuth <code>refresh_token</code> (starts with <code>1//</code>) or a full <code>gemini:antigravity</code> JSON credential blob.</p>
+      <input type="text" class="input-field" id="importTokenInput" placeholder="1//0g... or {&quot;token&quot;:{&quot;refresh_token&quot;:&quot;...&quot;}}">
+      <div style="display:flex;justify-content:flex-end;gap:6px;">
+        <button class="btn" onclick="closeImportModal()">Cancel</button>
+        <button class="btn btn-primary" onclick="submitImportToken()">Import &amp; Poll Account</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Toast Container -->
+  <div class="toast-wrap" id="toastWrap"></div>
+
+<script>
+  let STATE = {
+    accounts: [],
+    activeEmail: null,
+    languageServer: {},
+    instance: {},
+    snapshots: [],
+    settings: {},
+  };
+
+  const EXPANDED_MODELS = new Set();
+  const EXPANDED_WINDOWS = new Set();
+  let PRIVACY_MODE = localStorage.getItem('agy_privacy_mode') === '1' || new URLSearchParams(window.location.search).get('privacy') === '1';
+  let oauthPollTimer = null;
+
+  function maskEmail(email, idx) {
+    if (!email) return '—';
+    if (!PRIVACY_MODE) return email;
+    const n = String((typeof idx === 'number' ? idx : 0) + 1).padStart(2, '0');
+    return `ag-node-${n}@workspace.local`;
+  }
+
+  function togglePrivacyMode() {
+    PRIVACY_MODE = !PRIVACY_MODE;
+    localStorage.setItem('agy_privacy_mode', PRIVACY_MODE ? '1' : '0');
+    renderAll();
+    showToast(PRIVACY_MODE ? 'Privacy Mode enabled: emails and personal names masked' : 'Privacy Mode disabled');
+  }
+
+  function showToast(msg, isError = false) {
+    const wrap = document.getElementById('toastWrap');
+    const el = document.createElement('div');
+    el.className = 'toast';
+    if (isError) {
+      el.style.borderLeftColor = 'var(--red)';
+    }
+    el.textContent = msg;
+    wrap.appendChild(el);
+    setTimeout(() => el.remove(), 4000);
+  }
+
+  function timeAgo(iso) {
+    if (!iso) return 'never';
+    const sec = Math.max(0, Math.floor((Date.now() - new Date(iso).getTime()) / 1000));
+    if (sec < 45) return 'just now';
+    const min = Math.floor(sec / 60);
+    if (min < 60) return `${min}m ago`;
+    const hr = Math.floor(min / 60);
+    return `${hr}h ${min % 60}m ago`;
+  }
+
+  function colorClassForPct(pct) {
+    if (pct <= 5) return 'red';
+    if (pct <= 25) return 'amber';
+    return 'green';
+  }
+
+  function formatPctDisplay(val) {
+    if (val === undefined || val === null) return '100%';
+    const num = Number(val);
+    if (Number.isInteger(num) || num >= 100 || num <= 0) {
+      return `${Math.round(num)}%`;
+    }
+    return `${num.toFixed(1)}%`;
+  }
+
+  function escapeHtml(str) {
+    return String(str ?? '')
+      .replace(/&/g, '&amp;')
+      .replace(/</g, '&lt;')
+      .replace(/>/g, '&gt;')
+      .replace(/"/g, '&quot;');
+  }
+
+  async function apiGet(path) {
+    try {
+      const res = await fetch(path, { cache: 'no-store' });
+      return await res.json();
+    } catch (e) {
+      return { ok: false, error: e.message || String(e) };
+    }
+  }
+
+  async function apiPost(path, body = {}) {
+    try {
+      const res = await fetch(path, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body),
+      });
+      return await res.json();
+    } catch (e) {
+      return { ok: false, error: e.message || String(e) };
+    }
+  }
+
+  async function loadState() {
+    try {
+      const data = await apiGet('/api/state');
+      if (data && Array.isArray(data.accounts)) {
+        STATE = data;
+        if (new URLSearchParams(window.location.search).get('expand') === '1' && STATE.accounts[0]) {
+          EXPANDED_MODELS.add(STATE.accounts[0].id);
+        }
+        renderAll();
+      }
+    } catch (e) {
+      console.error('Failed to load state:', e);
+    }
+  }
+
+  function renderAll() {
+    const lsBadge = document.getElementById('lsStatusBadge');
+    if (STATE.languageServer && STATE.languageServer.running) {
+      lsBadge.textContent = `LS Active · PID ${STATE.languageServer.pid}`;
+      lsBadge.className = 'badge badge-verified';
+    } else {
+      lsBadge.textContent = 'Direct CloudCode Mode';
+      lsBadge.className = 'badge badge-plan';
+    }
+
+    const privBtn = document.getElementById('privacyToggleBtn');
+    const privLbl = document.getElementById('privacyToggleLabel');
+    if (privBtn && privLbl) {
+      privBtn.classList.toggle('btn-active-toggle', PRIVACY_MODE);
+      privLbl.textContent = PRIVACY_MODE ? 'Privacy: ON' : 'Privacy';
+    }
+
+    const activeDisplay = STATE.activeEmail ? maskEmail(STATE.activeEmail, 0) : 'None';
+    document.getElementById('activeCredBanner').textContent =
+      `Active WinCred (gemini:antigravity): ${activeDisplay}`;
+
+    if (STATE.settings) {
+      document.getElementById('chkPinWorkspaces').checked = !!STATE.settings.pinWorkspacesOnSwitch;
+      document.getElementById('chkAutoSnap').checked = !!STATE.settings.autoSnapshotBeforeSwitch;
+      document.getElementById('chkHotReloadLS').checked = !!STATE.settings.hotReloadLanguageServer;
+    }
+
+    document.getElementById('countAccounts').textContent = (STATE.accounts || []).length;
+    document.getElementById('countWorkspaces').textContent = ((STATE.instance && STATE.instance.projects) || []).length;
+    document.getElementById('countSnapshots').textContent = (STATE.snapshots || []).length;
+
+    renderAccountsTable();
+    renderWorkspacesTab();
+    renderSnapshotsTab();
+  }
+
+  function renderAccountsTable() {
+    const tbody = document.getElementById('accountsTableBody');
+    const accounts = STATE.accounts || [];
+    document.getElementById('tableFooterCount').textContent =
+      `${accounts.length} account${accounts.length === 1 ? '' : 's'}`;
+
+    if (accounts.length === 0) {
+      tbody.innerHTML = `
+        <tr>
+          <td colspan="7" style="text-align:center;padding:42px;color:var(--text-secondary);">
+            No Google OAuth accounts connected yet. Click <strong>+ Add Account</strong> above to sign in.
+          </td>
+        </tr>`;
+      return;
+    }
+
+    let html = '';
+    accounts.forEach((acc, idx) => {
+      const isExpandedModels = EXPANDED_MODELS.has(acc.id);
+      const isExpandedWindows = EXPANDED_WINDOWS.has(acc.id);
+      const windows = acc.quota_windows || [];
+      const visibleLimit = 4;
+      const shownWindows = isExpandedWindows ? windows : windows.slice(0, visibleLimit);
+      const hiddenCount = Math.max(0, windows.length - visibleLimit);
+
+      const totalModels = acc.models_count || (acc.models ? acc.models.length : 18) || 18;
+      const activeModels = acc.active_models_count !== undefined ? acc.active_models_count : totalModels;
+      const displayEmail = maskEmail(acc.email, idx);
+
+      // Build unified USAGE column (Argon #1 + Flash/Claude/GPT windows — zero line wrap)
+      let usageHtml = `
+        <div class="usage-sync-row">
+          <span>synced ${escapeHtml(timeAgo(acc.last_synced))}</span>
+          <button class="icon-btn" title="Poll account quotas now" onclick="refreshSingleAccount('${acc.id}', this)">
+            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><path d="M21 2v6h-6"></path><path d="M3 12a9 9 0 0 1 15-6.7L21 8"></path><path d="M3 22v-6h6"></path><path d="M21 12a9 9 0 0 1-15 6.7L3 16"></path></svg>
+          </button>
+        </div>
+      `;
+
+      if (windows.length === 0) {
+        usageHtml += `<div style="color:var(--text-muted);font-size:11.5px;padding:4px 0;">Click poll icon to fetch model quota windows</div>`;
+      } else {
+        for (const w of shownWindows) {
+          const pct = w.remainingExactPct !== undefined ? w.remainingExactPct : (w.remainingPct ?? 100);
+          const ccls = colorClassForPct(pct);
+          const isArgon = w.bucketId === 'gemini-4-argon';
+          const shortTitle = isArgon ? 'Gemini 4 Argon' : (w.shortLabel || w.label);
+          const leftSub = isArgon
+            ? `H/M/L · 1M ctx · ${formatPctDisplay(w.usedExactPct ?? (100 - pct))} used`
+            : 'poll';
+          usageHtml += `
+            <div class="quota-window ${isArgon ? 'argon-featured' : ''}">
+              <div class="qw-top">
+                <span class="qw-name" title="${escapeHtml(w.label)}">
+                  ${escapeHtml(shortTitle)}
+                  ${isArgon ? '<span class="badge-new">NEW</span>' : ''}
+                </span>
+                <span class="qw-pct ${ccls}">${formatPctDisplay(pct)} left</span>
+              </div>
+              <div class="qw-bar-track">
+                <div class="qw-bar-fill ${ccls}" style="width: ${Math.max(pct, 2)}%;"></div>
+              </div>
+              <div class="qw-bottom">
+                <span class="qw-bottom-left">${escapeHtml(leftSub)}</span>
+                <span class="qw-bottom-right">${w.resetsIn && w.resetsIn !== '—' ? 'resets ' + escapeHtml(w.resetsIn) : ''}</span>
+              </div>
+            </div>
+          `;
+        }
+
+        if (hiddenCount > 0 && !isExpandedWindows) {
+          usageHtml += `<button class="more-windows-link" onclick="toggleMoreWindows('${acc.id}')">+${hiddenCount} more window${hiddenCount > 1 ? 's' : ''}</button>`;
+        } else if (isExpandedWindows && windows.length > visibleLimit) {
+          usageHtml += `<button class="more-windows-link" onclick="toggleMoreWindows('${acc.id}')">Show less</button>`;
+        }
+
+        const firstWin = windows[0];
+        if (firstWin) {
+          const usedVal = firstWin.usedExactPct !== undefined ? firstWin.usedExactPct : (firstWin.usedPct || 0);
+          const rstFmt = firstWin.resetFormatted && firstWin.resetFormatted !== '—' ? ` · ${firstWin.resetFormatted}` : '';
+          usageHtml += `<div class="usage-footer-note">Polled via router · ${escapeHtml(firstWin.shortLabel || 'Argon')} ${formatPctDisplay(usedVal)} used${escapeHtml(rstFmt)}</div>`;
+        }
+      }
+
+      // Pool / Credits column
+      const promptAvail = acc.prompt_credits_available;
+      const flowAvail = acc.flow_credits_available;
+      let creditsHtml = '';
+      if (promptAvail !== undefined && promptAvail !== null) {
+        creditsHtml = `
+          <div class="credit-main">${Number(promptAvail).toLocaleString()} <span style="font-size:10.5px;color:var(--text-muted);font-weight:400;">prompt</span></div>
+          <div class="credit-sub">${Number(flowAvail || 0).toLocaleString()} flow</div>
+          <div class="credit-sub" style="color:var(--emerald);">${escapeHtml(acc.project_id || 'aicode-consumers')}</div>
+        `;
+      } else {
+        creditsHtml = `
+          <div class="credit-main">${acc.has_ai_credits ? 'AI Credits' : 'Standard Pool'}</div>
+          <div class="credit-sub">${escapeHtml(acc.project_id || 'aicode-consumers')}</div>
+        `;
+      }
+
+      html += `
+        <tr class="account-row ${acc.isActive ? 'active-account' : ''}">
+          <td class="col-check">
+            <input type="checkbox" class="row-checkbox" data-id="${acc.id}">
+          </td>
+          <td class="col-account">
+            <div class="acc-header">
+              <button class="expand-arrow ${isExpandedModels ? 'open' : ''}" onclick="toggleModelsDrawer('${acc.id}')" title="Toggle all ${totalModels} exact individual model quotas">▶</button>
+              <div class="acc-title-wrap">
+                <div class="acc-title">
+                  <span>Antigravity OAuth</span>
+                  ${acc.isActive ? '<span class="badge-active-ide">ACTIVE</span>' : ''}
+                </div>
+                <div class="acc-email" title="${escapeHtml(displayEmail)}">${escapeHtml(displayEmail)}</div>
+                <div class="acc-sub">${activeModels}/${totalModels} models active · serves ag/*</div>
+                <div class="acc-badges">
+                  <span class="badge badge-verified">
+                    <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.6"><polyline points="20 6 9 17 4 12"></polyline></svg>
+                    verified
+                  </span>
+                </div>
+              </div>
+            </div>
+          </td>
+          <td class="col-status">
+            ${acc.last_error
+              ? `<span class="badge badge-error" title="${escapeHtml(acc.last_error)}">Error</span>`
+              : `<span class="badge badge-enabled">${escapeHtml(acc.status || 'Enabled')}</span>`
+            }
+          </td>
+          <td class="col-plan">
+            <span class="badge badge-plan">${escapeHtml(acc.plan_name || 'Google AI Pro')}</span>
+          </td>
+          <td class="col-usage">
+            ${usageHtml}
+          </td>
+          <td class="col-credits">
+            ${creditsHtml}
+          </td>
+          <td class="col-actions">
+            <div class="action-group">
+              ${acc.isActive
+                ? `<button class="btn btn-sm" onclick="switchAccount('${acc.id}')" title="Re-sync active credential &amp; preserve workspace state">Re-Sync</button>`
+                : `<button class="btn btn-activate btn-sm" onclick="switchAccount('${acc.id}')">⚡ Activate</button>`
+              }
+              <button class="btn btn-danger-icon" onclick="removeAccount('${acc.id}', '${escapeHtml(displayEmail)}')" title="Remove account from Hub">
+                <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><path d="M18.36 6.64a9 9 0 1 1-12.73 0"></path><line x1="12" y1="2" x2="12" y2="12"></line></svg>
+              </button>
+            </div>
+          </td>
+        </tr>
+      `;
+
+      if (isExpandedModels) {
+        const models = acc.models || [];
+        let mCards = '';
+        for (const m of models) {
+          const mpct = m.remainingExactPct !== undefined ? m.remainingExactPct : (m.remainingPct ?? 100);
+          const mccls = colorClassForPct(mpct);
+          const isArgonModel = (m.modelId || '').toLowerCase().includes('argon') || (m.label || '').toLowerCase().includes('argon');
+          const ctxStr = m.maxTokens ? (m.maxTokens >= 1000000 ? '1M ctx' : `${Math.round(m.maxTokens / 1024)}K ctx`) : '';
+          const outStr = m.maxOutputTokens ? `${Math.round(m.maxOutputTokens / 1024)}K out` : '';
+          const caps = [
+            ctxStr,
+            outStr,
+            m.supportsThinking ? 'Think' : '',
+            m.supportsImages ? 'Vision' : '',
+          ].filter(Boolean).join(' · ');
+
+          mCards += `
+            <div class="model-card ${isArgonModel ? 'argon-highlight' : ''}">
+              <div class="model-card-top">
+                <span class="model-name" title="${escapeHtml(m.label)} (${escapeHtml(m.modelId)})">
+                  ${escapeHtml(m.label)}
+                </span>
+                <span class="qw-pct ${mccls}">${formatPctDisplay(mpct)}</span>
+              </div>
+              <div class="qw-bar-track">
+                <div class="qw-bar-fill ${mccls}" style="width:${Math.max(mpct, 2)}%;"></div>
+              </div>
+              <div class="qw-bottom" style="margin-top:4px;">
+                <span class="qw-bottom-left" style="color:var(--text-secondary);">${escapeHtml(m.modelId)}</span>
+                <span class="qw-bottom-right">resets ${escapeHtml(m.resetsIn || '—')}</span>
+              </div>
+              ${caps ? `<div class="qw-bottom" style="margin-top:2px;font-size:10px;"><span class="qw-bottom-left">${escapeHtml(caps)}</span><span class="qw-bottom-right">${escapeHtml(m.resetFormatted || '')}</span></div>` : ''}
+            </div>
+          `;
+        }
+        html += `
+          <tr class="models-drawer-row">
+            <td colspan="7" style="padding:0;">
+              <div class="models-drawer">
+                <div class="models-drawer-title">
+                  <span>Exact Deduplicated Model Quotas (${models.length} Unique Models) — ${escapeHtml(displayEmail)}</span>
+                  <span style="font-family:var(--font-mono);font-size:10.5px;color:var(--text-muted);">Token Expiry: ${escapeHtml(acc.tokenExpiry || 'Auto-Refreshed')}</span>
+                </div>
+                <div class="models-grid">
+                  ${mCards || '<div style="color:var(--text-muted);">No individual model breakdown cached yet. Click Poll to load.</div>'}
+                </div>
+              </div>
+            </td>
+          </tr>
+        `;
+      }
+    });
+
+    tbody.innerHTML = html;
+  }
+
+  function renderWorkspacesTab() {
+    const inst = STATE.instance || {};
+    const projects = inst.projects || [];
+    const convs = inst.conversations || [];
+    const mcps = inst.mcpServers || [];
+    const uset = inst.userSettings || {};
+    const appst = inst.appStorage || {};
+
+    document.getElementById('projectsList').innerHTML = projects.map(p => {
+      const fpaths = (p.folders || []).map(f => f.path).join(', ');
+      return `
+        <div class="list-item">
+          <div>
+            <div class="list-item-title">${escapeHtml(p.name)}</div>
+            <div class="list-item-sub">${escapeHtml(fpaths || p.file)}</div>
+          </div>
+          <span class="badge badge-verified">Pinned</span>
+        </div>
+      `;
+    }).join('') || '<div style="color:var(--text-muted);">No project definitions found.</div>';
+
+    document.getElementById('convTotalBadge').textContent = convs.length;
+    document.getElementById('conversationsList').innerHTML = convs.slice(0, 25).map(c => {
+      const ws = (c.workspaces || []).join(', ');
+      return `
+        <div class="list-item">
+          <div>
+            <div class="list-item-title">${escapeHtml(c.title)}</div>
+            <div class="list-item-sub">${escapeHtml(ws || c.id)} · ${c.steps || 0} steps</div>
+          </div>
+          <span class="tab-count">${escapeHtml(c.status || 'IDLE')}</span>
+        </div>
+      `;
+    }).join('') || '<div style="color:var(--text-muted);">No conversations found.</div>';
+
+    document.getElementById('mcpTotalBadge').textContent = mcps.length;
+    document.getElementById('mcpList').innerHTML = mcps.map(m => `
+      <div class="list-item">
+        <div>
+          <div class="list-item-title">${escapeHtml(m.name)}</div>
+          <div class="list-item-sub">${escapeHtml(m.command)}</div>
+        </div>
+        <span class="badge ${m.disabled ? 'badge-error' : 'badge-verified'}">${m.disabled ? 'Disabled' : 'Enabled'}</span>
+      </div>
+    `).join('') || '<div style="color:var(--text-muted);">No MCP servers configured.</div>';
+
+    const rawLastUser = appst.lastLoginUsername || '—';
+    const displayLastUser = rawLastUser !== '—' ? maskEmail(rawLastUser, 0) : '—';
+    const settingsEntries = [
+      ['lastLoginUsername (app_storage.json)', displayLastUser],
+      ['Saved Multi-Conversation Window Layouts', appst.savedWindowLayoutsCount ?? 0],
+      ['Last Selected Project ID', appst.lastSelectedProject || '—'],
+      ...Object.entries(uset).map(([k, v]) => [`userSettings.${k}`, JSON.stringify(v)]),
+    ];
+    document.getElementById('settingsList').innerHTML = settingsEntries.map(([k, v]) => `
+      <div class="list-item">
+        <div class="list-item-title" style="font-family:var(--font-mono);font-size:11.5px;">${escapeHtml(k)}</div>
+        <div class="list-item-sub" style="color:var(--emerald);">${escapeHtml(v)}</div>
+      </div>
+    `).join('');
+  }
+
+  function renderSnapshotsTab() {
+    const snaps = STATE.snapshots || [];
+    const container = document.getElementById('snapshotsList');
+    if (snaps.length === 0) {
+      container.innerHTML = '<div style="color:var(--text-muted);">No snapshots created yet.</div>';
+      return;
+    }
+    container.innerHTML = snaps.map(s => {
+      const cleanLabel = PRIVACY_MODE
+        ? String(s.label || '').replace(/[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}/g, 'masked@account')
+        : s.label;
+      return `
+        <div class="list-item">
+          <div>
+            <div class="list-item-title">${escapeHtml(cleanLabel)} <span class="tab-count" style="margin-left:6px;">${escapeHtml(s.tag || 'snapshot')}</span></div>
+            <div class="list-item-sub">${escapeHtml(s.id)} · Created ${escapeHtml(new Date(s.createdAt).toLocaleString())} · Files: ${escapeHtml((s.files || []).join(', '))}</div>
+          </div>
+          <button class="btn btn-activate btn-sm" onclick="restoreSnapshot('${s.id}', '${escapeHtml(cleanLabel)}')">Restore</button>
+        </div>
+      `;
+    }).join('');
+  }
+
+  function toggleModelsDrawer(accId) {
+    if (EXPANDED_MODELS.has(accId)) EXPANDED_MODELS.delete(accId);
+    else EXPANDED_MODELS.add(accId);
+    renderAccountsTable();
+  }
+
+  function toggleMoreWindows(accId) {
+    if (EXPANDED_WINDOWS.has(accId)) EXPANDED_WINDOWS.delete(accId);
+    else EXPANDED_WINDOWS.add(accId);
+    renderAccountsTable();
+  }
+
+  function toggleSelectAll(master) {
+    document.querySelectorAll('.row-checkbox[data-id]').forEach(cb => {
+      cb.checked = master.checked;
+    });
+  }
+
+  function switchTab(tab) {
+    ['accounts', 'workspaces', 'snapshots'].forEach(t => {
+      document.getElementById(`view-${t}`).style.display = (t === tab) ? 'block' : 'none';
+      document.getElementById(`tabBtn-${t}`).classList.toggle('active', t === tab);
+    });
+  }
+
+  async function refreshSingleAccount(accId, btnEl) {
+    const svg = btnEl ? btnEl.querySelector('svg') : null;
+    if (svg) svg.classList.add('spin');
+    try {
+      const res = await apiPost('/api/accounts/refresh', { accountId: accId });
+      if (res.ok) {
+        STATE.accounts = res.accounts;
+        STATE.activeEmail = res.activeEmail;
+        renderAll();
+        showToast('Polled latest model quotas & reset windows');
+      } else {
+        showToast(`Poll error: ${res.error || 'Failed to refresh'}`, true);
+      }
+    } finally {
+      if (svg) svg.classList.remove('spin');
+    }
+  }
+
+  async function refreshAllAccounts() {
+    const icon = document.getElementById('pollAllIcon');
+    icon.classList.add('spin');
+    try {
+      const res = await apiPost('/api/accounts/refresh', {});
+      if (res.ok) {
+        STATE.accounts = res.accounts;
+        STATE.activeEmail = res.activeEmail;
+        renderAll();
+        showToast('Synced live quotas for all connected accounts');
+      } else {
+        showToast(`Poll error: ${res.error || 'Failed to refresh all accounts'}`, true);
+      }
+    } finally {
+      icon.classList.remove('spin');
+    }
+  }
+
+  async function switchAccount(accId) {
+    const reloadLS = document.getElementById('chkHotReloadLS').checked;
+    const res = await apiPost('/api/accounts/switch', {
+      accountId: accId,
+      reloadLanguageServer: reloadLS,
+    });
+    if (res.ok) {
+      STATE.accounts = res.accounts;
+      STATE.activeEmail = res.activeEmail;
+      renderAll();
+      showToast(`Activated ${maskEmail(res.switchedTo, 0)} in WinCred (Workspaces & sessions preserved)`);
+    } else {
+      showToast(`Switch failed: ${res.error || 'Unknown error'}`, true);
+    }
+  }
+
+  async function removeAccount(accId, email) {
+    if (!confirm(`Remove ${email} from AGY Control Center?`)) return;
+    const res = await apiPost('/api/accounts/remove', { accountId: accId });
+    if (res.ok) {
+      STATE.accounts = res.accounts;
+      renderAll();
+      showToast(`Removed ${email}`);
+    } else {
+      showToast(`Remove failed: ${res.error || 'Unknown error'}`, true);
+    }
+  }
+
+  async function startGoogleOAuth() {
+    const res = await apiPost('/api/accounts/add-oauth', { openBrowser: true });
+    if (!res.ok) {
+      showToast(`Failed to start OAuth: ${res.error}`, true);
+      return;
+    }
+    const banner = document.getElementById('oauthBanner');
+    banner.classList.add('show');
+    const copyBtn = document.getElementById('oauthCopyUrlBtn');
+    copyBtn.onclick = () => {
+      navigator.clipboard.writeText(res.authUrl);
+      showToast('Copied Google OAuth URL to clipboard');
+    };
+
+    if (oauthPollTimer) clearInterval(oauthPollTimer);
+    oauthPollTimer = setInterval(async () => {
+      try {
+        const st = await apiGet(`/api/oauth/status?state=${encodeURIComponent(res.state)}`);
+        if (st.status === 'completed') {
+          clearInterval(oauthPollTimer);
+          banner.classList.remove('show');
+          await loadState();
+          showToast(`Connected & verified ${maskEmail(st.email, 0)}!`);
+        } else if (st.error) {
+          clearInterval(oauthPollTimer);
+          banner.classList.remove('show');
+          showToast(`OAuth error: ${st.error}`, true);
+        }
+      } catch (e) {}
+    }, 1500);
+  }
+
+  function cancelOAuthPoll() {
+    if (oauthPollTimer) clearInterval(oauthPollTimer);
+    document.getElementById('oauthBanner').classList.remove('show');
+  }
+
+  function openImportModal() {
+    document.getElementById('importTokenInput').value = '';
+    document.getElementById('importModal').classList.add('open');
+  }
+
+  function closeImportModal() {
+    document.getElementById('importModal').classList.remove('open');
+  }
+
+  async function submitImportToken() {
+    let raw = document.getElementById('importTokenInput').value.trim();
+    if (!raw) return;
+    if (raw.startsWith('{')) {
+      try {
+        const parsed = JSON.parse(raw);
+        raw = (parsed.token && parsed.token.refresh_token) || parsed.refresh_token || raw;
+      } catch (e) {}
+    }
+    const res = await apiPost('/api/accounts/import-token', { refreshToken: raw });
+    if (res.ok) {
+      closeImportModal();
+      STATE.accounts = res.accounts;
+      renderAll();
+      showToast('Account imported and quota windows synced');
+    } else {
+      showToast(`Import error: ${res.error}`, true);
+    }
+  }
+
+  async function createManualSnapshot() {
+    const res = await apiPost('/api/snapshots/create', {});
+    if (res.ok) {
+      STATE.snapshots = res.snapshots;
+      renderAll();
+      showToast(`Saved instance snapshot: ${res.snapshot.label}`);
+    } else {
+      showToast(`Snapshot failed: ${res.error || 'Unknown error'}`, true);
+    }
+  }
+
+  async function restoreSnapshot(snapId, label) {
+    const res = await apiPost('/api/snapshots/restore', { snapshotId: snapId });
+    if (res.ok) {
+      STATE.instance = res.instance;
+      STATE.snapshots = res.snapshots;
+      renderAll();
+      showToast(`Restored "${label}" while keeping ${maskEmail(STATE.activeEmail, 0)} logged in`);
+    } else {
+      showToast(`Restore failed: ${res.error || 'Unknown error'}`, true);
+    }
+  }
+
+  async function saveSettings() {
+    const body = {
+      pinWorkspacesOnSwitch: document.getElementById('chkPinWorkspaces').checked,
+      autoSnapshotBeforeSwitch: document.getElementById('chkAutoSnap').checked,
+      hotReloadLanguageServer: document.getElementById('chkHotReloadLS').checked,
+    };
+    await apiPost('/api/settings/update', body);
+  }
+
+  loadState();
+  setInterval(loadState, 30000);
+</script>
+</body>
+</html>

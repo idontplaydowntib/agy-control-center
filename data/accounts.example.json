@@ -1,0 +1,21 @@
+[
+  {
+    "id": "acc_example01",
+    "email": "ag-node-01@workspace.local",
+    "name": "Primary Workspace Account",
+    "picture": "",
+    "auth_method": "consumer",
+    "token": {
+      "access_token": "ya29.EXAMPLE_ACCESS_TOKEN",
+      "token_type": "Bearer",
+      "refresh_token": "1//0gEXAMPLE_REFRESH_TOKEN",
+      "expiry": "2026-12-31T23:59:59+00:00",
+      "expires_in": 3599
+    },
+    "status": "Enabled",
+    "plan_name": "Google AI Pro",
+    "tier_id": "g1-pro-tier",
+    "project_id": "aicode-consumers",
+    "has_ai_credits": true
+  }
+]

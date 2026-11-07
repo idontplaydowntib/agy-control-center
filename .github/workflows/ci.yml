@@ -1,0 +1,55 @@
+name: AGY Control Center CI
+
+on:
+  push:
+    branches: [ main, master ]
+  pull_request:
+    branches: [ main, master ]
+
+jobs:
+  verify-and-test:
+    name: Syntax, Security & Telemetry Verification
+    runs-on: windows-latest
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Compile & Syntax Check
+        run: python -m py_compile agy_hub.py
+
+      - name: Privacy & Secret Hygiene Gate
+        shell: pwsh
+        run: |
+          if (Test-Path "data/accounts.json") {
+            Write-Error "data/accounts.json must never be tracked in Git!"
+            exit 1
+          }
+          $tracked = git ls-files
+          foreach ($f in $tracked) {
+            if ($f -match "\.(png|jpg|gif)$") { continue }
+            $content = Get-Content $f -Raw -ErrorAction SilentlyContinue
+            if ($content -match "C:\\Users\\[a-zA-Z0-9_]+" -or $content -match "c:/Users/[a-zA-Z0-9_]+") {
+              Write-Error "Hardcoded local Windows user path detected in $f"
+              exit 1
+            }
+          }
+          Write-Host "Privacy & secret hygiene gate passed with zero leaks."
+
+      - name: Telemetry & Deduplication Unit Tests
+        run: |
+          python -c "
+          import agy_hub
+          assert agy_hub.format_exact_pct(0.004097) == 0.4
+          assert agy_hub.format_exact_pct(0.148157) == 14.8
+          assert agy_hub.format_exact_pct(1.0) == 100.0
+          assert 'gemini-4-argon-high' in agy_hub.MODEL_SORT_PRIORITY
+          assert 'gemini-2.5-flash' in agy_hub.LEGACY_ALIAS_MODEL_IDS
+          sanitized = agy_hub.sanitize_local_path(str(agy_hub.HOME_DIR / 'Desktop' / 'project'))
+          assert sanitized.startswith('~/'), f'Expected ~/ path, got {sanitized}'
+          print('All unit assertions passed!')
+          "
