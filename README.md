@@ -80,7 +80,9 @@ Then open **`http://127.0.0.1:17420/`** in any browser.
 ## Adding & Switching Accounts
 
 1. **Auto-Import Active IDE Account**: On first launch, AGY Control Center automatically reads your active `gemini:antigravity` credential from Windows Credential Manager and imports it into the pool.
-2. **Add Google Account (OAuth2 PKCE)**: Click **`+ Add Account`** in the top bar. A browser tab opens Google's OAuth consent screen, exchanges the authorization code via PKCE on `http://localhost:17420/auth/callback`, and immediately polls all 18 model quotas.
+2. **Add Google Account (OAuth2 PKCE)**: Click **`+ Add Account`** in the top bar and pick one of:
+   - **Sign in with this PC's browser** — opens Google's consent screen in the default browser and completes automatically on `http://localhost:17420/auth/callback`.
+   - **Get a sign-in link** — generates the same OAuth link without opening anything. Copy it, open it, or send it to another browser, profile or device. After signing in there, the browser lands on an address starting with `http://localhost:17420/auth/callback?...` (the page itself will not load on another device — that is expected). Paste that full address, or just the `code`, back into the dialog to finish. Links are single-use and expire after 15 minutes.
 3. **Import Refresh Token**: Click **`Import Token`** to paste an existing `1//0g...` refresh token or a full `gemini:antigravity` JSON credential blob.
 4. **Hot-Swap Active Account**: Click **`⚡ Activate`** on any row to switch the active IDE account while keeping all open projects, window layouts, and agent conversations intact.
 
@@ -92,7 +94,11 @@ Then open **`http://127.0.0.1:17420/`** in any browser.
 agy_hub/
 ├── agy_hub.py                  # Core Win32 ctypes bridge, OAuth PKCE server, CloudCode & ConnectRPC router
 ├── static/
-│   └── index.html              # Responsive single-file dashboard UI with Privacy Mode & model drawer
+│   ├── index.html              # Dashboard markup (Privacy Mode, model drawer, Add Account dialog)
+│   ├── app.css                 # Dark theme & responsive layout
+│   └── app.js                  # Dashboard logic (plain JS, no dependencies)
+├── tests/
+│   └── test_smoke.py           # Stdlib-only smoke tests (python -I tests/test_smoke.py)
 ├── assets/
 │   ├── dashboard-preview.png   # Main dashboard screenshot (Privacy Mode enabled)
 │   └── models-drawer-preview.png # 18-model deduplicated telemetry drawer screenshot
@@ -114,8 +120,11 @@ agy_hub/
 | Endpoint | Method | Description |
 |---|---|---|
 | `/api/state` | `GET` | Returns enriched accounts, active WinCred email, `language_server.exe` status, pinned workspaces, and snapshots |
-| `/api/accounts/refresh` | `POST` | Polls live CloudCode + ConnectRPC telemetry for one (`{"accountId": "..."}`) or all (`{}`) accounts in parallel |
-| `/api/accounts/add-oauth` | `POST` | Starts a Google OAuth2 PKCE login flow and returns `authUrl` + `state` |
+| `/api/accounts/refresh` | `POST` | Polls live CloudCode + ConnectRPC telemetry for one (`{"accountId": "..."}`), several (`{"accountIds": [...]}`) or all (`{}`) accounts in parallel |
+| `/api/accounts` | `GET` | Lightweight accounts + sync status (used for in-place UI refresh) |
+| `/api/accounts/add-oauth` | `POST` | Starts a Google OAuth2 PKCE login flow and returns `authUrl` + `state`. `{"openBrowser": false}` only generates the link |
+| `/api/accounts/add-oauth/complete` | `POST` | Finishes a link sign-in from the pasted redirect URL or code (`{"state": "...", "input": "..."}`) |
+| `/api/accounts/add-oauth/cancel` | `POST` | Cancels a pending sign-in link |
 | `/api/accounts/import-token` | `POST` | Imports an account from a raw OAuth `refreshToken` and polls its model quotas |
 | `/api/accounts/switch` | `POST` | Hot-swaps `gemini:antigravity` in WinCred, pins workspace layouts, and optionally restarts `language_server.exe` |
 | `/api/accounts/remove` | `POST` | Removes an account from the local pool |
@@ -124,7 +133,15 @@ agy_hub/
 
 ---
 
+## Sync Behaviour
+- **Auto-refresh**: the hub re-polls every account in the background (default every 2 minutes; change or turn it off with the **Auto-refresh** selector). The page updates in place without reloading.
+- **Retry with backoff**: timeouts, connection errors and HTTP 408/425/429/5xx are retried up to 3 times with exponential backoff, inside a 45-second budget per account.
+- **No silent failures**: if a step still fails, the previous values are kept and marked **stale**, and the account row shows which step failed and why. Each account has its own "synced … ago" timestamp and refresh button.
+
+---
+
 ## Security & Privacy Design
+- **Local Requests Only**: requests with a foreign `Host` header and cross-origin `POST`s are rejected, so other websites open in your browser cannot drive the hub.
 - **Local-Only Binding**: The HTTP server binds exclusively to `127.0.0.1:17420` (loopback only).
 - **Token Stripping**: `/api/state` strips raw `access_token` and `refresh_token` values before returning account metadata to the browser UI.
 - **Path Sanitization**: Local user profile paths (`C:\Users\<username>\...`) are automatically normalized to `~/...` across all API responses.

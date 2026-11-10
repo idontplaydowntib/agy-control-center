@@ -1,6 +1,6 @@
 # Local OAuth credentials, tokens, settings, and workspace snapshots (NEVER commit)
 data/accounts.json
-data/accounts.json.bak
+data/accounts.json.*
 data/*.tmp
 data/hub_settings.json
 data/hub_error.log*
