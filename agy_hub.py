@@ -88,6 +88,7 @@ OAUTH_AUTH_URL = "https://accounts.google.com/o/oauth2/auth"
 OAUTH_TOKEN_URL = "https://oauth2.googleapis.com/token"
 CLOUDCODE_BASE_URL = "https://daily-cloudcode-pa.googleapis.com"
 WINCRED_TARGET = "gemini:antigravity"
+OAUTH_FLOW_TTL_SEC = 15 * 60  # a generated sign-in link stays usable this long
 HUB_PORT = 17420
 
 for d in (DATA_DIR, SNAPSHOTS_DIR, STATIC_DIR):
@@ -1463,6 +1464,33 @@ def restore_snapshot(snap_id: str, preserve_login_email: str | None = None) -> b
 # ---------------------------------------------------------------------------
 # Account Hub State & Hot-Swap Engine
 # ---------------------------------------------------------------------------
+def parse_oauth_paste(text) -> dict:
+    """
+    Extract {code, state, error} from whatever the user pasted to finish a sign-in:
+    the full redirected URL (http://localhost:17420/auth/callback?state=...&code=...),
+    just its query string, or the bare authorization code.
+    """
+    raw = str(text or "").strip().strip("\"'<>` ")
+    result = {"code": "", "state": "", "error": ""}
+    if not raw:
+        return result
+    query = ""
+    if "://" in raw or raw.lower().startswith(("localhost", "127.0.0.1")):
+        parsed = urllib.parse.urlparse(raw if "://" in raw else "http://" + raw)
+        query = parsed.query or parsed.fragment
+    elif re.search(r"(^|[?&])(code|error)=", raw):
+        query = raw.split("?", 1)[-1].lstrip("&")
+    if query:
+        qs = urllib.parse.parse_qs(query)
+        for key in result:
+            result[key] = (qs.get(key) or [""])[0].strip()
+        return result
+    if "://" in raw:
+        return result  # a URL without code/error parameters
+    result["code"] = urllib.parse.unquote(raw) if "%" in raw else raw
+    return result
+
+
 class AccountHub:
     def __init__(self):
         self.lock = threading.RLock()
@@ -1790,8 +1818,39 @@ class AccountHub:
             self.save()
             return len(self.accounts) < before
 
-    def start_oauth_flow(self, callback_port: int) -> str:
+    def _purge_expired_oauth_flows(self):
+        cutoff = time.time() - OAUTH_FLOW_TTL_SEC
+        with self.lock:
+            for st in [k for k, f in self.pending_oauth.items() if f.get("created_at", 0) < cutoff]:
+                del self.pending_oauth[st]
+
+    def get_oauth_flow_status(self, state: str) -> dict:
+        with self.lock:
+            flow = self.pending_oauth.get(state)
+            if not flow:
+                return {"status": "unknown", "email": None, "error": None}
+            if flow["status"] in ("pending", "error") and time.time() - flow["created_at"] > OAUTH_FLOW_TTL_SEC:
+                return {"status": "expired", "email": None, "error": None}
+            return {"status": flow["status"], "email": flow.get("email"), "error": flow.get("error")}
+
+    def fail_oauth_flow(self, state: str, message: str):
+        with self.lock:
+            flow = self.pending_oauth.get(state)
+            if flow and flow["status"] == "pending":
+                flow["status"] = "error"
+                flow["error"] = message
+
+    def cancel_oauth_flow(self, state: str) -> bool:
+        with self.lock:
+            flow = self.pending_oauth.get(state)
+            if flow and flow["status"] in ("pending", "error"):
+                del self.pending_oauth[state]
+                return True
+            return False
+
+    def start_oauth_flow(self, callback_port: int) -> tuple[str, str]:
         """Generate PKCE verifier/challenge and Google OAuth URL for adding a new account."""
+        self._purge_expired_oauth_flows()
         verifier = base64.urlsafe_b64encode(secrets.token_bytes(32)).decode("ascii").rstrip("=")
         digest = hashlib.sha256(verifier.encode("ascii")).digest()
         challenge = base64.urlsafe_b64encode(digest).decode("ascii").rstrip("=")
@@ -1822,12 +1881,40 @@ class AccountHub:
         return f"{OAUTH_AUTH_URL}?{urllib.parse.urlencode(params)}", state
 
     def complete_oauth_callback(self, state: str, code: str) -> dict:
-        """Exchange authorization code for OAuth tokens, fetch user profile & quotas, and save account."""
+        """
+        Finish a sign-in started by start_oauth_flow. Shared by the automatic
+        /auth/callback redirect and the manual "paste the redirected URL" path, so a
+        link opened on this PC and a code pasted from another browser behave the same.
+        """
         with self.lock:
             flow = self.pending_oauth.get(state)
+            if flow and time.time() - flow["created_at"] > OAUTH_FLOW_TTL_SEC and flow["status"] != "completed":
+                del self.pending_oauth[state]
+                flow = None
             if not flow:
-                raise ValueError("Invalid or expired OAuth state parameter")
+                raise ValueError("This sign-in link is unknown or has expired. Generate a new link and try again.")
+            if flow["status"] == "completed":
+                # Already finished (e.g. the redirect reached the hub and the URL was pasted too)
+                done = next((a for a in self.accounts if a.get("email", "").lower() == (flow.get("email") or "").lower()), None)
+                if done:
+                    return done
+                raise ValueError("This sign-in link was already used. Generate a new link to add the account again.")
+            if flow["status"] == "exchanging":
+                raise ValueError("This sign-in is already being completed. Please wait a moment.")
+            flow["status"] = "exchanging"
+            flow["error"] = None
+        try:
+            return self._exchange_oauth_code(flow, code)
+        except Exception as e:
+            # Read the HTTP error body exactly once and keep the message for /api/oauth/status
+            msg = format_http_error(e)
+            with self.lock:
+                flow["status"] = "error"
+                flow["error"] = msg
+            raise RuntimeError(msg) from e
 
+    def _exchange_oauth_code(self, flow: dict, code: str) -> dict:
+        """Exchange authorization code for OAuth tokens, fetch user profile & quotas, and save account."""
         data = urllib.parse.urlencode({
             "client_id": OAUTH_CLIENT_ID,
             "client_secret": OAUTH_CLIENT_SECRET,
@@ -1895,11 +1982,11 @@ class AccountHub:
             flow["email"] = email
             self.save()
 
-        # Poll telemetry immediately for the newly connected account
-        try:
-            self.poll_account(acc["id"], active_email=self.get_active_wincred_email())
-        except Exception as e:
-            log_error(f"initial_poll({email})", e)
+        # Poll telemetry for the newly connected account in the background so the sign-in
+        # finishes immediately; the dashboard shows the account as "Syncing" meanwhile.
+        threading.Thread(
+            target=self.poll_account, args=(acc["id"], self.get_active_wincred_email()), daemon=True
+        ).start()
 
         return acc
 
@@ -2031,15 +2118,17 @@ class HubRequestHandler(http.server.BaseHTTPRequestHandler):
                 code = qs.get("code", [""])[0]
                 err = qs.get("error", [""])[0]
                 if err or not code:
-                    self._send_html(self._render_oauth_result(False, f"Google OAuth returned: {err or 'No code'}"), 400)
+                    msg = f"Google OAuth returned: {err or 'No code'}"
+                    HUB.fail_oauth_flow(state, msg)
+                    self._send_html(self._render_oauth_result(False, msg), 400)
                     return
                 try:
                     acc = HUB.complete_oauth_callback(state, code)
                     self._send_html(self._render_oauth_result(True, acc["email"], acc.get("name", ""), acc.get("plan_name", "Pro")))
                 except Exception as e:
-                    err_str = format_http_error(e)
+                    err_str = str(e) or type(e).__name__
                     log_error("oauth_callback", err_str)
-                    self._send_html(self._render_oauth_result(False, err_str), 500)
+                    self._send_html(self._render_oauth_result(False, err_str), 400 if isinstance(e, ValueError) else 500)
                 return
 
             if path == "/api/accounts":
@@ -2070,13 +2159,7 @@ class HubRequestHandler(http.server.BaseHTTPRequestHandler):
                 return
 
             if path == "/api/oauth/status":
-                state = qs.get("state", [""])[0]
-                flow = HUB.pending_oauth.get(state, {})
-                self._send_json({
-                    "status": flow.get("status", "unknown"),
-                    "email": flow.get("email"),
-                    "error": flow.get("error"),
-                })
+                self._send_json(HUB.get_oauth_flow_status(qs.get("state", [""])[0]))
                 return
 
             self._send_json({"error": "Not found"}, 404)
@@ -2121,12 +2204,51 @@ class HubRequestHandler(http.server.BaseHTTPRequestHandler):
             if path == "/api/accounts/add-oauth":
                 server_port = self.server.server_address[1]
                 auth_url, state = HUB.start_oauth_flow(server_port)
+                browser_opened = False
                 if body.get("openBrowser", True):
                     try:
-                        webbrowser.open(auth_url)
+                        browser_opened = bool(webbrowser.open(auth_url))
                     except Exception as e:
                         log_error("webbrowser_open", e)
-                self._send_json({"ok": True, "authUrl": auth_url, "state": state})
+                self._send_json({
+                    "ok": True,
+                    "authUrl": auth_url,
+                    "state": state,
+                    "browserOpened": browser_opened,
+                    "redirectUri": f"http://localhost:{server_port}/auth/callback",
+                    "expiresInSec": OAUTH_FLOW_TTL_SEC,
+                })
+                return
+
+            if path == "/api/accounts/add-oauth/complete":
+                # Manual finish: the user signed in elsewhere and pasted the redirected URL or code
+                pasted = parse_oauth_paste(body.get("input"))
+                body_state = str(body.get("state") or "").strip()
+                if pasted["error"]:
+                    self._send_json({"ok": False, "error": f"Google sign-in was not completed ({pasted['error']}). Open the link and try again."}, 400)
+                    return
+                code = pasted["code"]
+                if not code or re.search(r"\s", code):
+                    self._send_json({"ok": False, "error": "That doesn't contain an authorization code. Paste the full address of the page you were redirected to (it contains \"code=\")."}, 400)
+                    return
+                if pasted["state"] and body_state and pasted["state"] != body_state:
+                    self._send_json({"ok": False, "error": "That URL belongs to a different sign-in link. Use the link currently shown, or generate a new one."}, 400)
+                    return
+                state = pasted["state"] or body_state
+                if not state:
+                    self._send_json({"ok": False, "error": "Missing sign-in state. Generate a link first, then paste the redirected URL."}, 400)
+                    return
+                try:
+                    acc = HUB.complete_oauth_callback(state, code)
+                except (ValueError, RuntimeError) as e:
+                    log_error("oauth_manual_complete", e)
+                    self._send_json({"ok": False, "error": str(e)}, 400)
+                    return
+                self._send_json({"ok": True, "email": acc.get("email"), "accounts": HUB.get_enriched_accounts()})
+                return
+
+            if path == "/api/accounts/add-oauth/cancel":
+                self._send_json({"ok": True, "cancelled": HUB.cancel_oauth_flow(str(body.get("state") or ""))})
                 return
 
             if path == "/api/accounts/import-token":
@@ -2243,7 +2365,7 @@ class HubRequestHandler(http.server.BaseHTTPRequestHandler):
         badge = "ACCOUNT CONNECTED & VERIFIED" if success else "AUTHENTICATION FAILED"
         sub = (
             f"Loaded <strong>{title_or_email}</strong> ({name or 'Google Account'}) · Plan: <strong>{plan}</strong>.<br>"
-            "Model quotas and session vault synced. You can close this tab now."
+            "Model quotas are syncing in AGY Control Center. You can close this tab now."
             if success
             else f"Error: {title_or_email}"
         )

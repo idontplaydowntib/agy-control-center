@@ -385,6 +385,37 @@ tr.models-drawer-row > td { padding: 0 !important; }
 .input-field:focus { border-color: var(--emerald); }
 textarea.input-field { resize: vertical; min-height: 62px; line-height: 1.4; }
 
+/* ---------- Add Account dialog ---------- */
+.option-list { display: flex; flex-direction: column; gap: var(--space-2); margin-bottom: var(--space-3); }
+.option-card {
+  display: flex; flex-direction: column; gap: 3px; text-align: left; width: 100%;
+  background: var(--bg-elevated); color: var(--text-primary);
+  border: 1px solid var(--border-mid); border-radius: var(--radius-md);
+  padding: var(--space-3) var(--space-4); cursor: pointer; font: inherit;
+  transition: background 0.12s ease, border-color 0.12s ease;
+}
+.option-card:hover:not(:disabled) { background: var(--bg-hover); border-color: var(--emerald-border); }
+.option-card:disabled { opacity: 0.55; cursor: progress; }
+.option-title { font-size: var(--fs-md); font-weight: 600; }
+.option-desc { font-size: var(--fs-sm); color: var(--text-secondary); }
+.input-row { display: flex; gap: var(--space-2); align-items: flex-start; }
+.input-row .input-field { flex: 1; min-width: 0; margin-bottom: 6px; height: 32px; }
+.hint { font-size: var(--fs-xs); color: var(--text-muted); margin-bottom: var(--space-3); line-height: 1.5; }
+.step-num {
+  display: inline-flex; align-items: center; justify-content: center; width: 18px; height: 18px; margin-right: 4px;
+  border-radius: 50%; background: var(--emerald-bg); border: 1px solid var(--emerald-border);
+  color: var(--emerald-strong); font-size: 10.5px; font-weight: 700;
+}
+.flow-status { font-size: var(--fs-sm); min-height: 20px; margin-bottom: var(--space-3); color: var(--text-secondary); overflow-wrap: anywhere; }
+.flow-status.s-busy { color: var(--blue); }
+.flow-status.s-warn { color: var(--amber); }
+.flow-status.s-err { color: var(--red); }
+@media (max-width: 520px) {
+  .input-row { flex-wrap: wrap; }
+  .input-row .input-field { flex-basis: 100%; }
+  .modal-actions .btn { flex: 1 1 auto; }
+}
+
 /* ---------- Toasts ---------- */
 .toast-wrap { position: fixed; bottom: var(--space-4); right: var(--space-5); display: flex; flex-direction: column; gap: 6px; z-index: 200; max-width: min(420px, calc(100vw - 32px)); }
 .toast {
@@ -412,7 +443,7 @@ textarea.input-field { resize: vertical; min-height: 62px; line-height: 1.4; }
   .table-card { overflow-x: visible; }
   table.accounts-table, table.accounts-table tbody, table.accounts-table tr, table.accounts-table td { display: block; width: auto; max-width: none; min-width: 0; }
   table.accounts-table thead { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0, 0, 0, 0); }
-  tr.account-row { display: grid; grid-template-columns: auto 1fr auto; column-gap: var(--space-2); padding: var(--space-3); }
+  table.accounts-table tr.account-row { display: grid; grid-template-columns: auto 1fr auto; column-gap: var(--space-2); padding: var(--space-3); }
   table.accounts-table tr.account-row > td { padding: 0; }
   tr.account-row > .col-check { grid-column: 1; grid-row: 1; }
   tr.account-row > .col-account { grid-column: 2; grid-row: 1; }

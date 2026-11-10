@@ -838,6 +838,7 @@ async function saveSettings() {
 function togglePrivacyMode() {
   UI.privacy = !UI.privacy;
   localStorage.setItem('agy_privacy_mode', UI.privacy ? '1' : '0');
+  $('toastWrap').replaceChildren();  // older toasts may still show unmasked emails
   renderAll();
   showToast(UI.privacy ? 'Privacy Mode enabled: emails and personal names masked' : 'Privacy Mode disabled');
 }
@@ -915,14 +916,144 @@ async function submitImportToken() {
   }
 }
 
-/* ---------- Direct Google OAuth flow ---------- */
-const OAuth = { state: null, authUrl: '', timer: null, startedAt: 0 };
-const OAUTH_WAIT_LIMIT_MS = 15 * 60 * 1000;
+/* ---------- Add Account (direct sign-in, or shareable link + pasted redirect) ---------- */
+const OAuth = { state: null, authUrl: '', timer: null, mode: null, lastError: '' };
+
+const AddAccount = {
+  isOpen() { return Modal.current === $('addAccountModal'); },
+
+  open() {
+    if (OAuth.state) { this.reopen(); return; }
+    this.showChoose();
+    Modal.open('addAccountModal', { focus: 'addOptDirect', onClose: () => this.onClosed() });
+  },
+
+  reopen() {
+    $('oauthBanner').hidden = true;
+    this.showFlow();
+    Modal.open('addAccountModal', { focus: 'addAccPaste', onClose: () => this.onClosed() });
+  },
+
+  /* Closing the dialog does not abandon a pending sign-in: it keeps waiting behind a banner */
+  onClosed() {
+    $('oauthBanner').hidden = !OAuth.state;
+  },
+
+  showChoose() {
+    $('addAccChoose').hidden = false;
+    $('addAccFlow').hidden = true;
+    this.setStatus('addAccChooseStatus', '');
+  },
+
+  showFlow() {
+    $('addAccChoose').hidden = true;
+    $('addAccFlow').hidden = false;
+    $('addAccFlowIntro').textContent = OAuth.mode === 'direct'
+      ? 'Google sign-in was opened in your default browser. Finish signing in there — this dialog closes by itself when the account is added.'
+      : 'Open this link in any browser or profile (or send it to another device), sign in, then paste the address you end up on.';
+    $('addAccLink').value = OAuth.authUrl;
+  },
+
+  setStatus(id, text, kind = '') {
+    const el = $(id);
+    el.textContent = maskText(text);
+    el.className = 'flow-status' + (kind ? ` ${kind}` : '');
+  },
+
+  async start(mode) {
+    const buttons = [...document.querySelectorAll('#addAccChoose .option-card')];
+    buttons.forEach(b => { b.disabled = true; });
+    this.setStatus('addAccChooseStatus', 'Creating sign-in link…', 's-busy');
+    const res = await apiPost('/api/accounts/add-oauth', { openBrowser: mode === 'direct' });
+    buttons.forEach(b => { b.disabled = false; });
+    if (!res.ok) {
+      this.setStatus('addAccChooseStatus', `Could not start sign-in: ${res.error || 'unknown error'}`, 's-err');
+      return;
+    }
+    OAuth.mode = mode;
+    $('addAccPaste').value = '';
+    $('addAccRedirect').textContent = res.redirectUri || 'http://localhost:17420/auth/callback';
+    const until = new Date(Date.now() + (res.expiresInSec || 900) * 1000);
+    $('addAccExpiry').textContent = `Single-use link, valid until ${until.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}.`;
+    watchOAuth(res.state, res.authUrl);
+    this.showFlow();
+    if (mode === 'direct' && res.browserOpened === false) {
+      this.setStatus('addAccStatus', 'The browser could not be opened automatically. Use Copy or Open on the link above.', 's-warn');
+    } else {
+      this.setStatus('addAccStatus', 'Waiting for sign-in…', 's-busy');
+    }
+    if (this.isOpen()) $(mode === 'direct' ? 'addAccPaste' : 'addAccCopyBtn').focus();
+  },
+
+  async cancelPending() {
+    const state = OAuth.state;
+    stopOAuthWait();
+    if (state) await apiPost('/api/accounts/add-oauth/cancel', { state });
+  },
+
+  async back() {
+    await this.cancelPending();
+    this.showChoose();
+    $('addOptDirect').focus();
+  },
+
+  async regenerate() {
+    const mode = OAuth.mode || 'link';
+    await this.cancelPending();
+    this.showChoose();
+    await this.start(mode === 'direct' ? 'link' : mode);
+  },
+
+  async copy() {
+    const ok = await copyText(OAuth.authUrl);
+    if (!ok) { $('addAccLink').focus(); $('addAccLink').select(); }
+    showToast(ok ? 'Sign-in link copied' : 'Could not copy automatically — the link is selected, press Ctrl+C', !ok);
+  },
+
+  openLink() {
+    if (OAuth.authUrl) window.open(OAuth.authUrl, '_blank', 'noopener');
+  },
+
+  async finish() {
+    const input = $('addAccPaste').value.trim();
+    if (!OAuth.state) { this.setStatus('addAccStatus', 'This sign-in link is no longer active. Choose New link.', 's-err'); return; }
+    if (!input) {
+      this.setStatus('addAccStatus', 'Paste the redirected URL (or the code) first.', 's-err');
+      $('addAccPaste').focus();
+      return;
+    }
+    const state = OAuth.state;
+    const btn = $('addAccFinishBtn');
+    btn.disabled = true;
+    this.setStatus('addAccStatus', 'Exchanging the code with Google…', 's-busy');
+    const seq = ++UI.reqSeq;
+    const res = await apiPost('/api/accounts/add-oauth/complete', { state, input });
+    btn.disabled = false;
+    if (res.ok) {
+      this.succeeded(state, res.email, res, seq);
+    } else if (OAuth.state === state) {
+      OAuth.lastError = res.error || '';
+      this.setStatus('addAccStatus', res.error || 'Could not finish sign-in.', 's-err');
+      $('addAccPaste').focus();
+    }
+  },
+
+  succeeded(state, email, res, seq) {
+    if (OAuth.state !== state) return;  // already handled by the other path (poll vs. paste)
+    stopOAuthWait();
+    if (this.isOpen()) Modal.close();
+    if (res && Array.isArray(res.accounts)) applyAccounts(res, seq);
+    loadState();
+    schedulePoll(FAST_POLL_MS);
+    showToast(`Added ${maskEmail(email)} — syncing quotas now`);
+  },
+};
 
 function stopOAuthWait() {
   if (OAuth.timer) clearInterval(OAuth.timer);
   OAuth.timer = null;
   OAuth.state = null;
+  OAuth.lastError = '';
   $('oauthBanner').hidden = true;
 }
 
@@ -930,38 +1061,39 @@ function watchOAuth(state, authUrl) {
   stopOAuthWait();
   OAuth.state = state;
   OAuth.authUrl = authUrl;
-  OAuth.startedAt = Date.now();
-  $('oauthBanner').hidden = false;
   OAuth.timer = setInterval(async () => {
     if (OAuth.state !== state) return;
     const st = await apiGet(`/api/oauth/status?state=${encodeURIComponent(state)}`);
     if (OAuth.state !== state || st.networkError) return;
     if (st.status === 'completed') {
+      AddAccount.succeeded(state, st.email, null, 0);
+    } else if (st.status === 'error') {
+      // Keep the link alive: the user can paste a fresh redirect URL or generate a new link
+      if (st.error !== OAuth.lastError) {
+        OAuth.lastError = st.error || '';
+        if (AddAccount.isOpen()) AddAccount.setStatus('addAccStatus', `Sign-in failed: ${st.error || 'unknown error'}`, 's-err');
+        else showToast(`Sign-in failed: ${st.error || 'unknown error'}`, true);
+      }
+    } else if (st.status === 'unknown' || st.status === 'expired') {
+      const wasOpen = AddAccount.isOpen();
       stopOAuthWait();
-      await loadState();
-      showToast(`Connected & verified ${maskEmail(st.email)}`);
-    } else if (st.status === 'error' || st.error) {
-      stopOAuthWait();
-      showToast(`Sign-in failed: ${st.error || 'unknown error'}`, true);
-    } else if (st.status === 'unknown' || st.status === 'expired' || Date.now() - OAuth.startedAt > OAUTH_WAIT_LIMIT_MS) {
-      stopOAuthWait();
-      showToast('The sign-in attempt expired. Choose Add Account to start again.', true);
+      if (wasOpen) AddAccount.setStatus('addAccStatus', 'This sign-in link has expired. Choose New link to create another.', 's-err');
+      else showToast('The sign-in link expired. Choose Add Account to start again.', true);
     }
   }, 1500);
 }
 
-async function startGoogleOAuth() {
-  const res = await apiPost('/api/accounts/add-oauth', { openBrowser: true });
-  if (!res.ok) {
-    showToast(`Failed to start sign-in: ${res.error || 'unknown error'}`, true);
-    return;
-  }
-  watchOAuth(res.state, res.authUrl);
-}
-
 /* ---------- Event wiring (delegated, so re-rendered rows need no re-binding) ---------- */
 const ACTIONS = {
-  'add-account': () => startGoogleOAuth(),
+  'add-account': () => AddAccount.open(),
+  'add-start': (el) => AddAccount.start(el.dataset.mode),
+  'add-import': () => { Modal.close(); openImportModal(); },
+  'add-copy': () => AddAccount.copy(),
+  'add-open': () => AddAccount.openLink(),
+  'add-finish': () => AddAccount.finish(),
+  'add-back': () => AddAccount.back(),
+  'add-regenerate': () => AddAccount.regenerate(),
+  'add-reopen': () => AddAccount.reopen(),
   'open-import': () => openImportModal(),
   'import-submit': () => submitImportToken(),
   'close-modal': () => Modal.close(),
@@ -977,7 +1109,7 @@ const ACTIONS = {
   'remove': (el) => removeAccount(el.dataset.id),
   'retry-connection': () => loadState(),
   'oauth-copy': async () => showToast(await copyText(OAuth.authUrl) ? 'Copied Google sign-in URL' : 'Could not copy — select the URL manually', false),
-  'oauth-cancel': () => stopOAuthWait(),
+  'oauth-cancel': () => AddAccount.cancelPending(),
   'toggle-drawer': (el) => {
     const id = el.dataset.id;
     if (UI.expandedModels.has(id)) UI.expandedModels.delete(id); else UI.expandedModels.add(id);
@@ -1023,6 +1155,8 @@ document.addEventListener('keydown', (e) => {
     e.preventDefault();
   }
   if (e.key === 'Enter' && e.target.id === 'importTokenInput') submitImportToken();
+  // Enter submits the pasted redirect URL (Shift+Enter still inserts a newline)
+  if (e.key === 'Enter' && !e.shiftKey && e.target.id === 'addAccPaste') { e.preventDefault(); AddAccount.finish(); }
 });
 
 /* ---------- Auto-refresh loop (in place, no page reload) ---------- */

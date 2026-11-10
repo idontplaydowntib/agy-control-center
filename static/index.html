@@ -96,6 +96,7 @@
         <span id="oauthBannerText">Waiting for Google sign-in to finish…</span>
       </div>
       <div class="banner-actions">
+        <button type="button" class="btn btn-sm" data-action="add-reopen">Show details</button>
         <button type="button" class="btn btn-sm" data-action="oauth-copy">Copy URL</button>
         <button type="button" class="btn btn-sm" data-action="oauth-cancel">Cancel</button>
       </div>
@@ -189,6 +190,67 @@
       <div class="modal-actions">
         <button type="button" class="btn" data-action="close-modal">Cancel</button>
         <button type="button" class="btn btn-primary" id="importSubmitBtn" data-action="import-submit">Import &amp; Poll Account</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Add Account Modal -->
+  <div class="modal-backdrop" id="addAccountModal">
+    <div class="modal modal-wide" role="dialog" aria-modal="true" aria-labelledby="addAccTitle">
+      <div class="modal-head">
+        <h2 id="addAccTitle">Add Google Account</h2>
+        <button type="button" class="icon-btn" data-action="close-modal" aria-label="Close dialog">✕</button>
+      </div>
+
+      <!-- Step A: choose how to sign in -->
+      <div id="addAccChoose">
+        <p>Choose how you want to sign in.</p>
+        <div class="option-list">
+          <button type="button" class="option-card" id="addOptDirect" data-action="add-start" data-mode="direct">
+            <span class="option-title">Sign in with this PC's browser</span>
+            <span class="option-desc">Opens Google sign-in in your default browser. The account is added automatically when you finish.</span>
+          </button>
+          <button type="button" class="option-card" data-action="add-start" data-mode="link">
+            <span class="option-title">Get a sign-in link</span>
+            <span class="option-desc">Create a link to copy, open in another browser or profile, or send to another device. Then paste the address you are redirected to.</span>
+          </button>
+          <button type="button" class="option-card" data-action="add-import">
+            <span class="option-title">Import a refresh token</span>
+            <span class="option-desc">Paste an existing <code>1//…</code> refresh token or a <code>gemini:antigravity</code> credential.</span>
+          </button>
+        </div>
+        <div class="flow-status" id="addAccChooseStatus" role="status" aria-live="polite"></div>
+      </div>
+
+      <!-- Step B: link + paste -->
+      <div id="addAccFlow" hidden>
+        <p id="addAccFlowIntro"></p>
+
+        <label class="field-label" for="addAccLink"><span class="step-num">1</span> Sign-in link</label>
+        <div class="input-row">
+          <input type="text" class="input-field" id="addAccLink" readonly spellcheck="false" aria-describedby="addAccExpiry">
+          <button type="button" class="btn" id="addAccCopyBtn" data-action="add-copy">Copy</button>
+          <button type="button" class="btn" data-action="add-open">Open</button>
+        </div>
+        <div class="hint" id="addAccExpiry"></div>
+
+        <label class="field-label" for="addAccPaste"><span class="step-num">2</span> Paste the redirected URL or code</label>
+        <div class="hint" id="addAccPasteHint">
+          After you sign in, the browser goes to an address starting with <code id="addAccRedirect">http://localhost:17420/auth/callback</code>.
+          On this PC the account is added automatically. In another browser profile or device that page will not load — that is expected:
+          copy the whole address from the address bar and paste it here.
+        </div>
+        <textarea class="input-field" id="addAccPaste" rows="3" spellcheck="false" autocomplete="off"
+          placeholder="http://localhost:17420/auth/callback?state=…&amp;code=4/0A…   or just the code"
+          aria-describedby="addAccPasteHint addAccStatus"></textarea>
+
+        <div class="flow-status" id="addAccStatus" role="status" aria-live="polite"></div>
+
+        <div class="modal-actions">
+          <button type="button" class="btn" data-action="add-back">Back</button>
+          <button type="button" class="btn" data-action="add-regenerate">New link</button>
+          <button type="button" class="btn btn-primary" id="addAccFinishBtn" data-action="add-finish">Finish adding account</button>
+        </div>
       </div>
     </div>
   </div>
