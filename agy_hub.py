@@ -881,7 +881,15 @@ def poll_account_telemetry(account: dict, active_email: str | None = None, ls_in
         if token_failed or len(data_failed) == 2:
             state = "failed"
             if token_failed:
-                stale.update({k: bool(account.get("quota_windows") or account.get("models")) for k in stale})
+                # Nothing could be fetched: every cached value on this account is now stale
+                has_cache = bool(account.get("quota_windows") or account.get("models"))
+                stale.update({k: has_cache for k in stale})
+                for w in account.get("quota_windows") or []:
+                    if isinstance(w, dict):
+                        w["stale"] = True
+                        w.setdefault("asOf", account.get("last_synced") or "")
+                if isinstance(account.get("argon_status"), dict):
+                    account["argon_status"]["stale"] = True
         elif errors:
             state = "partial"
         else:
@@ -1902,6 +1910,13 @@ HUB = AccountHub()
 # ---------------------------------------------------------------------------
 # HTTP API & OAuth Callback Server
 # ---------------------------------------------------------------------------
+# Fixed allowlist of UI assets (no path is ever built from the request, so no traversal)
+STATIC_ASSETS = {
+    "/static/app.css": ("app.css", "text/css; charset=utf-8"),
+    "/static/app.js": ("app.js", "text/javascript; charset=utf-8"),
+}
+
+
 class ThreadedHTTPServer(socketserver.ThreadingMixIn, http.server.HTTPServer):
     daemon_threads = True
     # On Windows SO_REUSEADDR lets a second process bind the *same* live port, so a double
@@ -1940,6 +1955,23 @@ class HubRequestHandler(http.server.BaseHTTPRequestHandler):
             pass
         except Exception as e:
             log_error("_send_html", e)
+
+    def _send_static(self, filename: str, content_type: str):
+        try:
+            raw = (STATIC_DIR / filename).read_bytes()
+        except OSError:
+            self._send_json({"error": "Not found"}, 404)
+            return
+        try:
+            self.send_response(200)
+            self.send_header("Content-Type", content_type)
+            self.send_header("Content-Length", str(len(raw)))
+            self.send_header("Cache-Control", "no-store")
+            self.send_header("X-Content-Type-Options", "nosniff")
+            self.end_headers()
+            self.wfile.write(raw)
+        except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError):
+            pass
 
     def _read_json_body(self) -> dict:
         try:
@@ -1988,6 +2020,10 @@ class HubRequestHandler(http.server.BaseHTTPRequestHandler):
                     self._send_html(index_file.read_text(encoding="utf-8"))
                 else:
                     self._send_html("<h1>UI file missing</h1>", 404)
+                return
+
+            if path in STATIC_ASSETS:
+                self._send_static(*STATIC_ASSETS[path])
                 return
 
             if path == "/auth/callback":
