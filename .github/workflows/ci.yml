@@ -6,6 +6,9 @@ on:
   pull_request:
     branches: [ main, master ]
 
+permissions:
+  contents: read
+
 jobs:
   verify-and-test:
     name: Syntax, Security & Telemetry Verification
@@ -19,8 +22,13 @@ jobs:
         with:
           python-version: "3.12"
 
-      - name: Compile & Syntax Check
-        run: python -m py_compile agy_hub.py
+      - name: Compile & Syntax Check (Python)
+        run: |
+          python -I -m py_compile agy_hub.py
+          python -I -m py_compile tests/test_smoke.py
+
+      - name: Syntax Check (JavaScript)
+        run: node --check static/app.js
 
       - name: Privacy & Secret Hygiene Gate
         shell: pwsh
@@ -40,16 +48,7 @@ jobs:
           }
           Write-Host "Privacy & secret hygiene gate passed with zero leaks."
 
-      - name: Telemetry & Deduplication Unit Tests
-        run: |
-          python -c "
-          import agy_hub
-          assert agy_hub.format_exact_pct(0.004097) == 0.4
-          assert agy_hub.format_exact_pct(0.148157) == 14.8
-          assert agy_hub.format_exact_pct(1.0) == 100.0
-          assert 'gemini-4-argon-high' in agy_hub.MODEL_SORT_PRIORITY
-          assert 'gemini-2.5-flash' in agy_hub.LEGACY_ALIAS_MODEL_IDS
-          sanitized = agy_hub.sanitize_local_path(str(agy_hub.HOME_DIR / 'Desktop' / 'project'))
-          assert sanitized.startswith('~/'), f'Expected ~/ path, got {sanitized}'
-          print('All unit assertions passed!')
-          "
+      # Stdlib-only suite: catalog/dedup rules, Argon sync retry + stale handling,
+      # Add Account link flow and the HTTP API, with all Google/WinCred calls stubbed.
+      - name: Telemetry, Sync & API Smoke Tests
+        run: python -I tests/test_smoke.py
