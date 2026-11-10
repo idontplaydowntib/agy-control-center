@@ -9,11 +9,14 @@ import base64
 import ctypes
 from ctypes import wintypes
 import datetime
+import copy
 import hashlib
 import html
+import http.client
 import http.server
 import json
 import os
+import random
 import re
 import secrets
 import shutil
@@ -36,7 +39,8 @@ from pathlib import Path
 # Constants & Paths
 # ---------------------------------------------------------------------------
 BASE_DIR = Path(__file__).resolve().parent
-DATA_DIR = BASE_DIR / "data"
+# AGY_HUB_DATA_DIR relocates all hub state (used by the test suite so it never touches real accounts)
+DATA_DIR = Path(os.environ.get("AGY_HUB_DATA_DIR") or (BASE_DIR / "data"))
 SNAPSHOTS_DIR = DATA_DIR / "snapshots"
 ACCOUNTS_FILE = DATA_DIR / "accounts.json"
 ACCOUNTS_BACKUP_FILE = DATA_DIR / "accounts.json.bak"
@@ -646,18 +650,272 @@ MODEL_SORT_PRIORITY = [
     "gemini-3.1-flash-lite",
     "gemini-2.5-pro",
 ]
+_MODEL_PRIORITY_INDEX = {mid: i for i, mid in enumerate(MODEL_SORT_PRIORITY)}
+_MODEL_TIERS = ("high", "medium", "low")
+_MODEL_LABEL_WORDS = {"gpt": "GPT", "oss": "OSS", "120b": "120B"}
+
+# ---------------------------------------------------------------------------
+# Retry with backoff for transient CloudCode / OAuth failures
+# ---------------------------------------------------------------------------
+RETRYABLE_HTTP_CODES = {408, 425, 429, 500, 502, 503, 504}
+RETRY_MAX_ATTEMPTS = 3
+RETRY_BASE_DELAY_SEC = 0.6
+RETRY_MAX_DELAY_SEC = 8.0
+# Wall-clock budget for one account's full poll (token refresh + 3 CloudCode calls incl. retries)
+ACCOUNT_POLL_BUDGET_SEC = 45.0
 
 
-def poll_account_telemetry(account: dict, active_email: str | None = None, ls_info: dict | None = None) -> dict:
+def is_retryable_error(exc: BaseException) -> bool:
+    """True for failures worth retrying: timeouts, dropped connections, 429 and 5xx."""
+    if isinstance(exc, urllib.error.HTTPError):
+        return exc.code in RETRYABLE_HTTP_CODES
+    # URLError, socket/ssl timeouts and connection resets are all OSError subclasses;
+    # a truncated body surfaces as JSONDecodeError / http.client.HTTPException.
+    return isinstance(exc, (OSError, json.JSONDecodeError, http.client.HTTPException))
+
+
+def call_with_retry(fn, attempts: int = RETRY_MAX_ATTEMPTS, base_delay: float = RETRY_BASE_DELAY_SEC,
+                    deadline: float | None = None, sleep=None):
+    """
+    Call fn(), retrying transient failures with exponential backoff + jitter.
+    Honors Retry-After (capped) and never sleeps past `deadline` (time.monotonic() based).
+    Non-retryable errors (400/401/403/404...) are raised immediately.
+    """
+    for attempt in range(max(1, attempts)):
+        try:
+            return fn()
+        except Exception as e:
+            if attempt >= attempts - 1 or not is_retryable_error(e):
+                raise
+            delay = min(base_delay * (2 ** attempt), RETRY_MAX_DELAY_SEC) + random.uniform(0, 0.25)
+            if isinstance(e, urllib.error.HTTPError):
+                try:
+                    delay = max(delay, min(float(e.headers.get("Retry-After", "")), RETRY_MAX_DELAY_SEC))
+                except (TypeError, ValueError, AttributeError):
+                    pass
+            if deadline is not None and time.monotonic() + delay >= deadline:
+                raise
+            (sleep or time.sleep)(delay)
+
+
+# ---------------------------------------------------------------------------
+# Model catalog construction (pure functions — covered by tests/test_smoke.py)
+# ---------------------------------------------------------------------------
+def canonical_model_key(mid) -> str:
+    """Normalize a fetchAvailableModels key for alias/priority lookups."""
+    key = str(mid or "").strip().lower()
+    return key[len("models/"):] if key.startswith("models/") else key
+
+
+def label_from_model_id(mid: str) -> str:
+    """'gemini-4-argon-high' -> 'Gemini 4 Argon (High)' for entries that arrive without a displayName."""
+    parts = [p for p in canonical_model_key(mid).split("-") if p]
+    tier = parts.pop() if parts and parts[-1] in _MODEL_TIERS else ""
+    name = " ".join(_MODEL_LABEL_WORDS.get(p, p.capitalize()) for p in parts)
+    return f"{name} ({tier.capitalize()})" if tier else name
+
+
+def _with_tier_suffix(label: str, mid: str) -> str:
+    tier = canonical_model_key(mid).rsplit("-", 1)[-1]
+    if tier in _MODEL_TIERS and tier not in label.lower():
+        return f"{label} ({tier.capitalize()})"
+    return label
+
+
+def quota_fraction(qinfo: dict | None) -> float:
+    """
+    Read remainingFraction as a float in [0, 1].
+    The API serializes proto3 JSON, which omits zero-valued fields: a fully used quota
+    arrives as {"resetTime": "..."} with no remainingFraction at all. Treat that as 0
+    (exhausted), not 100%. No quota info at all means the model is not metered.
+    """
+    if not isinstance(qinfo, dict):
+        return 1.0
+    raw = qinfo.get("remainingFraction")
+    if raw is None:
+        return 0.0 if qinfo.get("resetTime") else 1.0
+    try:
+        val = float(raw)
+    except (TypeError, ValueError):
+        return 0.0 if qinfo.get("resetTime") else 1.0
+    if val != val:  # NaN
+        return 1.0
+    return max(0.0, min(1.0, val))
+
+
+def _safe_int(value, default: int = 0) -> int:
+    try:
+        return int(value or default)
+    except (TypeError, ValueError):
+        return default
+
+
+def _quota_fields(qinfo: dict | None) -> dict:
+    rem = quota_fraction(qinfo)
+    rst = str((qinfo or {}).get("resetTime") or "") if isinstance(qinfo, dict) else ""
+    exact_pct = format_exact_pct(rem)
+    return {
+        "remainingFraction": round(rem, 6),
+        "remainingExactPct": exact_pct,
+        "remainingPct": int(round(rem * 100)),
+        "usedExactPct": round(100.0 - exact_pct, 1),
+        "resetTime": rst,
+        "resetsIn": format_reset_countdown(rst),
+        "resetFormatted": format_reset_timestamp(rst),
+    }
+
+
+def build_model_catalog(raw_models) -> tuple[dict, dict]:
+    """
+    Turn the fetchAvailableModels `models` map into the deduplicated per-model catalog.
+    Returns (models_by_id, seen_display_names).
+
+    Rules:
+    - Legacy alias keys are dropped.
+    - Non-canonical keys that repeat an already-listed display name are aliases: dropped.
+    - Canonical keys (MODEL_SORT_PRIORITY) are never dropped: if two share a display name
+      (e.g. every Argon tier named "Gemini 4 Argon") both are kept and labelled by tier, and
+      a missing displayName is derived from the key instead of skipping the entry.
+    - One malformed entry never aborts the rest of the catalog.
+    """
+    if isinstance(raw_models, list):
+        raw_models = {
+            str(m.get("id") or m.get("name") or m.get("model") or ""): m
+            for m in raw_models if isinstance(m, dict)
+        }
+    if not isinstance(raw_models, dict):
+        return {}, {}
+
+    def _sort_key(mid):
+        key = canonical_model_key(mid)
+        if key in _MODEL_PRIORITY_INDEX:
+            return (0, _MODEL_PRIORITY_INDEX[key], key)
+        return (1 if "argon" in key else 2, 0, key)
+
+    models_by_id: dict = {}
+    seen_display_names: dict = {}
+    for mid in sorted(raw_models.keys(), key=_sort_key):
+        key = canonical_model_key(mid)
+        if not key or key in LEGACY_ALIAS_MODEL_IDS:
+            continue
+        try:
+            minfo = raw_models[mid]
+            if not isinstance(minfo, dict):
+                continue
+            canonical = key in _MODEL_PRIORITY_INDEX
+            dname = str(minfo.get("displayName") or "").strip()
+            if not dname:
+                if not (canonical or "argon" in key):
+                    continue
+                dname = label_from_model_id(key)
+            norm_name = dname.lower()
+            holder = seen_display_names.get(norm_name)
+            if holder is not None:
+                if not canonical:
+                    continue  # alias of a model that is already listed
+                # Two canonical models share one display name: keep both, disambiguate by tier
+                relabeled = _with_tier_suffix(models_by_id[holder]["label"], holder)
+                if relabeled != models_by_id[holder]["label"]:
+                    models_by_id[holder]["label"] = relabeled
+                    seen_display_names[relabeled.lower()] = holder
+                dname = _with_tier_suffix(dname, key)
+                norm_name = dname.lower()
+                if seen_display_names.get(norm_name, mid) != mid:
+                    dname = f"{dname} [{key}]"
+                    norm_name = dname.lower()
+            seen_display_names[norm_name] = mid
+            models_by_id[mid] = {
+                "modelId": mid,
+                "label": dname,
+                **_quota_fields(minfo.get("quotaInfo")),
+                "maxTokens": _safe_int(minfo.get("maxTokens")),
+                "maxOutputTokens": _safe_int(minfo.get("maxOutputTokens")),
+                "supportsThinking": bool(minfo.get("supportsThinking", False)),
+                "supportsImages": bool(minfo.get("supportsImages", False)),
+                "supportsVideo": bool(minfo.get("supportsVideo", False)),
+                "recommended": bool(minfo.get("recommended", False)),
+                "tag": minfo.get("tagTitle", "") or "",
+                "tagDescription": minfo.get("tagDescription", "") or "",
+            }
+        except Exception as e:
+            log_error(f"build_model_catalog({mid})", e)
+    return models_by_id, seen_display_names
+
+
+def is_argon_model(model: dict) -> bool:
+    return "argon" in str(model.get("modelId", "")).lower() or "argon" in str(model.get("label", "")).lower()
+
+
+def _utc_now_iso() -> str:
+    return datetime.datetime.now(datetime.timezone.utc).isoformat()
+
+
+def poll_account_telemetry(account: dict, active_email: str | None = None, ls_info: dict | None = None,
+                           deadline: float | None = None) -> dict:
     """
     Poll full quota windows, dedicated Gemini 4 Argon telemetry, exact non-duplicated model quotas,
     plan tier, and credit status for an account.
     Works for ANY account (active or inactive) via direct CloudCode v1internal endpoints with
     the Antigravity LanguageServer User-Agent and project payload.
+
+    Every step is retried with backoff on transient failures. A step that still fails never
+    erases the data it could not refresh: the previous values are kept and flagged stale, and
+    the outcome is recorded in account["sync"] so the UI can show it instead of failing silently.
     """
-    tok = account.get("token", {})
+    if deadline is None:
+        deadline = time.monotonic() + ACCOUNT_POLL_BUDGET_SEC
+    now_iso = _utc_now_iso()
+    prev_sync = account.get("sync") if isinstance(account.get("sync"), dict) else {}
+    errors: list[dict] = []
+    stale = {"argon": False, "windows": False, "models": False}
+
+    def _fail(step: str, exc: BaseException | str):
+        msg = exc if isinstance(exc, str) else format_http_error(exc)
+        msg = msg or type(exc).__name__
+        log_error(f"{step}({account.get('email')})", msg)
+        errors.append({"step": step, "message": msg})
+
+    def _finish(token_failed: bool = False) -> dict:
+        failed_steps = {e["step"] for e in errors}
+        data_failed = failed_steps & {"retrieveUserQuotaSummary", "fetchAvailableModels"}
+        if token_failed or len(data_failed) == 2:
+            state = "failed"
+            if token_failed:
+                stale.update({k: bool(account.get("quota_windows") or account.get("models")) for k in stale})
+        elif errors:
+            state = "partial"
+        else:
+            state = "ok"
+        data_fresh = not token_failed and not any(stale.values()) and state != "failed"
+        if data_fresh:
+            account["last_synced"] = now_iso
+        account["sync"] = {
+            "state": state,
+            "errors": errors,
+            "stale": dict(stale),
+            "lastAttempt": now_iso,
+            "lastSuccess": now_iso if data_fresh else (prev_sync.get("lastSuccess") or account.get("last_synced") or ""),
+            "consecutiveFailures": 0 if state == "ok" else int(prev_sync.get("consecutiveFailures") or 0) + 1,
+        }
+        if token_failed:
+            account["status"] = "Token Error"
+        else:
+            account["status"] = {"ok": "Enabled", "partial": "Degraded", "failed": "Sync Error"}[state]
+        account["last_error"] = "; ".join(f"{e['step']}: {e['message']}" for e in errors) or None
+        return account
+
+    tok = account.get("token")
+    if not isinstance(tok, dict):
+        tok = account["token"] = {}
     refresh_tok = tok.get("refresh_token", "")
     access_tok = tok.get("access_token", "")
+
+    def _apply_token(new_tok: dict):
+        nonlocal access_tok
+        tok["access_token"] = new_tok["access_token"]
+        tok["expiry"] = new_tok["expiry"]
+        tok["expires_in"] = new_tok["expires_in"]
+        access_tok = new_tok["access_token"]
 
     # Check if token needs refresh
     needs_refresh = False
@@ -666,7 +924,7 @@ def poll_account_telemetry(account: dict, active_email: str | None = None, ls_in
         needs_refresh = True
     else:
         try:
-            exp_dt = datetime.datetime.fromisoformat(expiry_str.replace("Z", "+00:00"))
+            exp_dt = datetime.datetime.fromisoformat(str(expiry_str).replace("Z", "+00:00"))
             if (exp_dt - datetime.datetime.now(datetime.timezone.utc)).total_seconds() < 300:
                 needs_refresh = True
         except Exception:
@@ -674,32 +932,36 @@ def poll_account_telemetry(account: dict, active_email: str | None = None, ls_in
 
     if needs_refresh and refresh_tok:
         try:
-            new_tok = refresh_google_token(refresh_tok)
-            account["token"]["access_token"] = new_tok["access_token"]
-            account["token"]["expiry"] = new_tok["expiry"]
-            account["token"]["expires_in"] = new_tok["expires_in"]
-            access_tok = new_tok["access_token"]
+            _apply_token(call_with_retry(lambda: refresh_google_token(refresh_tok), deadline=deadline))
         except Exception as e:
-            err_msg = format_http_error(e)
-            log_error(f"refresh_google_token({account.get('email')})", err_msg)
-            account["status"] = "Token Error"
-            account["last_error"] = err_msg
-            return account
+            _fail("refreshToken", e)
+            return _finish(token_failed=True)
+    elif not access_tok:
+        _fail("refreshToken", "No OAuth token stored for this account. Remove it and add it again.")
+        return _finish(token_failed=True)
+
+    reauthed = False
 
     def _safe_cloudcode_call(endpoint: str, payload: dict | None = None) -> dict:
-        nonlocal access_tok
         req_body = payload if payload is not None else {}
-        try:
-            return cloudcode_post(endpoint, access_tok, req_body)
-        except urllib.error.HTTPError as he:
-            if he.code in (401, 403) and refresh_tok:
-                new_tok = refresh_google_token(refresh_tok)
-                account["token"]["access_token"] = new_tok["access_token"]
-                account["token"]["expiry"] = new_tok["expiry"]
-                account["token"]["expires_in"] = new_tok["expires_in"]
-                access_tok = new_tok["access_token"]
-                return cloudcode_post(endpoint, access_tok, req_body)
-            raise
+
+        def _once():
+            nonlocal reauthed
+            try:
+                res = cloudcode_post(endpoint, access_tok, req_body)
+            except urllib.error.HTTPError as he:
+                # Access token revoked/expired early: refresh once per poll, then replay the call
+                if he.code in (401, 403) and refresh_tok and not reauthed:
+                    reauthed = True
+                    _apply_token(refresh_google_token(refresh_tok))
+                    res = cloudcode_post(endpoint, access_tok, req_body)
+                else:
+                    raise
+            if not isinstance(res, dict):
+                raise ValueError(f"Unexpected {endpoint} response type: {type(res).__name__}")
+            return res
+
+        return call_with_retry(_once, deadline=deadline)
 
     # 1. Profile info if missing
     if not account.get("name") or not account.get("picture"):
@@ -713,6 +975,8 @@ def poll_account_telemetry(account: dict, active_email: str | None = None, ls_in
             log_error(f"userinfo({account.get('email')})", format_http_error(e))
 
     # 2. LoadCodeAssist -> Plan, Tier & CloudAICompanion Project Info
+    # A failure here falls back to the cached project id, so the model list below is still
+    # requested for the right project instead of the generic default.
     project_id = account.get("project_id") or "aicode-consumers"
     try:
         lca = _safe_cloudcode_call("loadCodeAssist", {"metadata": {"ideType": "ANTIGRAVITY"}})
@@ -720,191 +984,114 @@ def poll_account_telemetry(account: dict, active_email: str | None = None, ls_in
         curr_tier = lca.get("currentTier") or {}
         tier_name = paid_tier.get("name") or curr_tier.get("name") or "Google AI Pro"
         tier_id = paid_tier.get("id") or curr_tier.get("id") or "g1-pro-tier"
-        project_id = lca.get("cloudaicompanionProject") or project_id
+        lca_project = lca.get("cloudaicompanionProject")
+        if isinstance(lca_project, dict):
+            lca_project = lca_project.get("id") or lca_project.get("name")
+        project_id = lca_project or project_id
         account["plan_name"] = tier_name
         account["tier_id"] = tier_id
         account["project_id"] = project_id
-        credits_list = paid_tier.get("availableCredits", [])
+        credits_list = paid_tier.get("availableCredits") or []
         account["has_ai_credits"] = len(credits_list) > 0
     except Exception as e:
-        log_error(f"loadCodeAssist({account.get('email')})", format_http_error(e))
+        _fail("loadCodeAssist", e)
 
     # 3. RetrieveUserQuotaSummary -> Window Buckets (Gemini 5h/Weekly, Claude/GPT 5h/Weekly)
     raw_buckets = {}
-    quota_err = None
+    quota_ok = False
     try:
         qsum = _safe_cloudcode_call("retrieveUserQuotaSummary", {})
-        for grp in qsum.get("groups", []):
+        for grp in qsum.get("groups") or []:
+            if not isinstance(grp, dict):
+                continue
             grp_name = grp.get("displayName", "")
-            for b in grp.get("buckets", []):
+            for b in grp.get("buckets") or []:
+                if not isinstance(b, dict):
+                    continue
                 bid = b.get("bucketId", "")
                 if not bid or bid in raw_buckets:
                     continue
-                rem = float(b.get("remainingFraction", 1.0))
-                rst = b.get("resetTime", "")
-                win = b.get("window", "")
-                exact_pct = format_exact_pct(rem)
+                fields = _quota_fields(b)
                 raw_buckets[bid] = {
                     "bucketId": bid,
                     "groupName": grp_name,
-                    "window": win,
-                    "remainingFraction": round(rem, 6),
-                    "remainingExactPct": exact_pct,
-                    "remainingPct": int(round(rem * 100)),
-                    "usedExactPct": round(100.0 - exact_pct, 1),
-                    "usedPct": int(round((1.0 - rem) * 100)),
-                    "resetTime": rst,
-                    "resetsIn": format_reset_countdown(rst),
-                    "resetFormatted": format_reset_timestamp(rst),
+                    "window": b.get("window", ""),
+                    **fields,
+                    "usedPct": int(round((1.0 - fields["remainingFraction"]) * 100)),
                     "description": b.get("description", ""),
                 }
+        quota_ok = True
     except Exception as e:
-        quota_err = format_http_error(e)
-        log_error(f"retrieveUserQuotaSummary({account.get('email')})", quota_err)
+        _fail("retrieveUserQuotaSummary", e)
 
     # 4. FetchAvailableModels with {"project": project_id} -> Returns Gemini 4 Argon + all exact models
     models_by_id = {}
     seen_display_names = {}
+    models_ok = False
     try:
         fmodels = _safe_cloudcode_call("fetchAvailableModels", {"project": project_id})
-        raw_models = fmodels.get("models", {})
-
-        # Sort keys so canonical IDs (e.g. gemini-3.5-flash-lite) are processed before any alias
-        sorted_mids = sorted(
-            raw_models.keys(),
-            key=lambda k: (
-                0 if k in MODEL_SORT_PRIORITY else 1,
-                MODEL_SORT_PRIORITY.index(k) if k in MODEL_SORT_PRIORITY else 999,
-                k,
-            ),
-        )
-
-        for mid in sorted_mids:
-            if mid in LEGACY_ALIAS_MODEL_IDS:
-                continue
-            minfo = raw_models[mid]
-            dname = (minfo.get("displayName") or "").strip()
-            if not dname:
-                continue
-            # Strictly prevent duplicate display names
-            norm_name = dname.lower()
-            if norm_name in seen_display_names:
-                continue
-            seen_display_names[norm_name] = mid
-
-            qinfo = minfo.get("quotaInfo") or {}
-            rem = float(qinfo.get("remainingFraction", 1.0))
-            rst = qinfo.get("resetTime", "")
-            exact_pct = format_exact_pct(rem)
-            max_tok = int(minfo.get("maxTokens") or 0)
-            max_out = int(minfo.get("maxOutputTokens") or 0)
-
-            models_by_id[mid] = {
-                "modelId": mid,
-                "label": dname,
-                "remainingFraction": round(rem, 6),
-                "remainingExactPct": exact_pct,
-                "remainingPct": int(round(rem * 100)),
-                "usedExactPct": round(100.0 - exact_pct, 1),
-                "resetTime": rst,
-                "resetsIn": format_reset_countdown(rst),
-                "resetFormatted": format_reset_timestamp(rst),
-                "maxTokens": max_tok,
-                "maxOutputTokens": max_out,
-                "supportsThinking": bool(minfo.get("supportsThinking", False)),
-                "supportsImages": bool(minfo.get("supportsImages", False)),
-                "supportsVideo": bool(minfo.get("supportsVideo", False)),
-                "recommended": bool(minfo.get("recommended", False)),
-                "tag": minfo.get("tagTitle", ""),
-                "tagDescription": minfo.get("tagDescription", ""),
-            }
+        models_by_id, seen_display_names = build_model_catalog(fmodels.get("models"))
+        if not models_by_id:
+            raise ValueError("fetchAvailableModels returned no usable models")
+        models_ok = True
     except Exception as e:
-        log_error(f"fetchAvailableModels({account.get('email')})", format_http_error(e))
+        _fail("fetchAvailableModels", e)
 
     # 5. If this is the currently active account in Antigravity's LanguageServer,
     # enrich with GetUserStatus prompt/flow credits and merge any live LS model info without duplicating
     is_active = bool(active_email and account.get("email", "").lower() == active_email.lower())
     if is_active:
-        if ls_info is None:
-            ls_info = discover_language_server()
-        if ls_info:
-            ustatus = call_ls_rpc("GetUserStatus", {}, ls_info)
-            if ustatus and "userStatus" in ustatus:
-                us = ustatus["userStatus"]
-                if us.get("profilePictureUrl"):
-                    account["picture_data_uri"] = us["profilePictureUrl"]
-                pstatus = us.get("planStatus") or {}
-                pinfo = pstatus.get("planInfo") or {}
-                account["prompt_credits_available"] = pstatus.get("availablePromptCredits", 0)
-                account["flow_credits_available"] = pstatus.get("availableFlowCredits", 0)
-                account["monthly_prompt_credits"] = pinfo.get("monthlyPromptCredits", 50000)
-                account["monthly_flow_credits"] = pinfo.get("monthlyFlowCredits", 150000)
-                account["plan_tier_badge"] = pinfo.get("planName", account.get("plan_name", "Pro"))
-                if us.get("userTier", {}).get("name"):
-                    account["plan_name"] = us["userTier"]["name"]
+        try:
+            _merge_language_server_status(account, models_by_id, seen_display_names, ls_info, merge_models=models_ok)
+        except Exception as e:
+            log_error(f"GetUserStatus({account.get('email')})", e)
 
-                cmodels = us.get("cascadeModelConfigData", {}).get("clientModelConfigs", [])
-                for cm in cmodels:
-                    lbl = (cm.get("label") or "").strip()
-                    if not lbl:
-                        continue
-                    norm_lbl = lbl.lower()
-                    existing_mid = seen_display_names.get(norm_lbl)
-                    mid = existing_mid or cm.get("modelId") or norm_lbl.replace(" ", "-")
-                    prev = models_by_id.get(mid, {})
-                    if prev:
-                        # Preserve exact live CloudCode fraction from fetchAvailableModels, only enrich tag if missing
-                        if cm.get("tagTitle") and not prev.get("tag"):
-                            prev["tag"] = cm["tagTitle"]
-                        continue
-                    qinfo = cm.get("quotaInfo") or {}
-                    rem = float(qinfo.get("remainingFraction", 1.0))
-                    rst = qinfo.get("resetTime", "")
-                    exact_pct = format_exact_pct(rem)
-                    models_by_id[mid] = {
-                        "modelId": mid,
-                        "label": lbl,
-                        "remainingFraction": round(rem, 6),
-                        "remainingExactPct": exact_pct,
-                        "remainingPct": int(round(rem * 100)),
-                        "usedExactPct": round(100.0 - exact_pct, 1),
-                        "resetTime": rst,
-                        "resetsIn": format_reset_countdown(rst),
-                        "resetFormatted": format_reset_timestamp(rst),
-                        "maxTokens": int(cm.get("maxTokens") or 1048576),
-                        "maxOutputTokens": int(cm.get("maxOutputTokens") or 65536),
-                        "supportsThinking": True,
-                        "supportsImages": True,
-                        "tag": cm.get("tagTitle", ""),
-                    }
-                    seen_display_names[norm_lbl] = mid
-
-    # 6. Build dedicated Gemini 4 Argon status block (from gemini-4-argon-high / medium / low)
-    argon_models = [
-        m for mid, m in models_by_id.items()
-        if "argon" in mid.lower() or "argon" in m.get("label", "").lower()
-    ]
+    # 6. Build dedicated Gemini 4 Argon status block (from gemini-4-argon-high / medium / low).
+    # Fallbacks, in order: the Argon bucket of the quota summary, then the previous value
+    # flagged stale. Argon is only cleared when the catalog was fetched cleanly without it.
+    prev_argon = account.get("argon_status") if isinstance(account.get("argon_status"), dict) else None
+    argon_models = [m for m in models_by_id.values() if is_argon_model(m)] if models_ok else []
+    argon_bucket = next((b for bid, b in raw_buckets.items() if "argon" in bid.lower()), None)
+    argon_common = {"available": True, "label": "Gemini 4 Argon", "tiersLabel": "High · Medium · Low"}
     if argon_models:
         primary_argon = argon_models[0]
         account["argon_status"] = {
-            "available": True,
-            "label": "Gemini 4 Argon",
-            "tiersLabel": "High · Medium · Low",
+            **argon_common,
             "variants": [m["label"] for m in argon_models],
             "modelIds": [m["modelId"] for m in argon_models],
-            "remainingFraction": primary_argon["remainingFraction"],
-            "remainingExactPct": primary_argon["remainingExactPct"],
-            "remainingPct": primary_argon["remainingPct"],
-            "usedExactPct": primary_argon["usedExactPct"],
-            "resetTime": primary_argon["resetTime"],
-            "resetsIn": primary_argon["resetsIn"],
-            "resetFormatted": primary_argon["resetFormatted"],
+            **{k: primary_argon[k] for k in (
+                "remainingFraction", "remainingExactPct", "remainingPct", "usedExactPct",
+                "resetTime", "resetsIn", "resetFormatted")},
             "maxTokens": primary_argon.get("maxTokens") or 1048576,
             "maxOutputTokens": primary_argon.get("maxOutputTokens") or 65536,
             "supportsThinking": bool(primary_argon.get("supportsThinking", True)),
             "supportsImages": bool(primary_argon.get("supportsImages", True)),
             "tag": primary_argon.get("tag") or "New",
+            "source": "fetchAvailableModels",
+            "stale": False,
+            "asOf": now_iso,
         }
+    elif argon_bucket:
+        account["argon_status"] = {
+            **argon_common,
+            "variants": (prev_argon or {}).get("variants", []),
+            "modelIds": (prev_argon or {}).get("modelIds", []),
+            **{k: argon_bucket[k] for k in (
+                "remainingFraction", "remainingExactPct", "remainingPct", "usedExactPct",
+                "resetTime", "resetsIn", "resetFormatted")},
+            "maxTokens": (prev_argon or {}).get("maxTokens") or 1048576,
+            "maxOutputTokens": (prev_argon or {}).get("maxOutputTokens") or 65536,
+            "supportsThinking": True,
+            "supportsImages": True,
+            "tag": (prev_argon or {}).get("tag") or "New",
+            "source": "retrieveUserQuotaSummary",
+            "stale": False,
+            "asOf": now_iso,
+        }
+    elif prev_argon and errors:
+        # Could not confirm Argon this round (a step failed): keep the last known value, visibly stale
+        account["argon_status"] = {**prev_argon, "stale": True, "asOf": prev_argon.get("asOf") or account.get("last_synced") or ""}
+        stale["argon"] = True
     else:
         account["argon_status"] = None
 
@@ -928,55 +1115,123 @@ def poll_account_telemetry(account: dict, active_email: str | None = None, ls_in
             "resetFormatted": ar["resetFormatted"],
             "specs": f"H/M/L · 1M ctx · {ar['usedExactPct']}% used",
             "description": "Dedicated Gemini 4 Argon (High / Medium / Low) weekly quota pool",
+            "stale": bool(ar.get("stale")),
+            "asOf": ar.get("asOf", ""),
         })
 
-    bucket_display_meta = [
-        ("gemini-5h", "Gemini 3.8 Flash · Daily (5h)", "Gemini 3.8 Flash · Daily", "poll · 5h window"),
-        ("gemini-weekly", "Gemini 3.8 Flash · Weekly", "Gemini 3.8 Flash · Weekly", "poll · 7d window"),
-        ("3p-5h", "Claude Opus 5.5 & Sonnet 5.5 · Daily (5h)", "Claude 5.5 & GPT · Daily", "poll · Opus/Sonnet/GPT"),
-        ("3p-weekly", "Claude Opus 5.5 & Sonnet 5.5 · Weekly", "Claude 5.5 & GPT · Weekly", "poll · 7d window"),
-    ]
-    for bid, full_lbl, short_lbl, specs_txt in bucket_display_meta:
-        if bid in raw_buckets:
-            b = raw_buckets[bid]
-            clean_windows.append({
-                **b,
-                "label": full_lbl,
-                "shortLabel": short_lbl,
-                "specs": specs_txt,
-            })
+    if quota_ok:
+        bucket_display_meta = [
+            ("gemini-5h", "Gemini 3.8 Flash · Daily (5h)", "Gemini 3.8 Flash · Daily", "poll · 5h window"),
+            ("gemini-weekly", "Gemini 3.8 Flash · Weekly", "Gemini 3.8 Flash · Weekly", "poll · 7d window"),
+            ("3p-5h", "Claude Opus 5.5 & Sonnet 5.5 · Daily (5h)", "Claude 5.5 & GPT · Daily", "poll · Opus/Sonnet/GPT"),
+            ("3p-weekly", "Claude Opus 5.5 & Sonnet 5.5 · Weekly", "Claude 5.5 & GPT · Weekly", "poll · 7d window"),
+        ]
+        for bid, full_lbl, short_lbl, specs_txt in bucket_display_meta:
+            if bid in raw_buckets:
+                clean_windows.append({
+                    **raw_buckets[bid],
+                    "label": full_lbl,
+                    "shortLabel": short_lbl,
+                    "specs": specs_txt,
+                    "stale": False,
+                    "asOf": now_iso,
+                })
 
-    # Include any other unexpected bucket IDs without duplicating Argon
-    known_bids = {w["bucketId"] for w in clean_windows} | {"gemini-argon-wtu-weekly"}
-    for bid, b in raw_buckets.items():
-        if bid not in known_bids and "argon" not in bid.lower():
-            clean_windows.append({
-                **b,
-                "label": f"{b['groupName'] or bid} · {b['window']}",
-                "shortLabel": f"{b['groupName'] or bid} · {b['window']}",
-                "specs": b.get("description", ""),
-            })
+        # Include any other unexpected bucket IDs without duplicating Argon
+        known_bids = {w["bucketId"] for w in clean_windows}
+        for bid, b in raw_buckets.items():
+            if bid not in known_bids and "argon" not in bid.lower():
+                clean_windows.append({
+                    **b,
+                    "label": f"{b['groupName'] or bid} · {b['window']}",
+                    "shortLabel": f"{b['groupName'] or bid} · {b['window']}",
+                    "specs": b.get("description", ""),
+                    "stale": False,
+                    "asOf": now_iso,
+                })
+    else:
+        # Quota summary failed: keep the previous non-Argon windows, flagged stale
+        for w in account.get("quota_windows") or []:
+            if isinstance(w, dict) and w.get("bucketId") != "gemini-4-argon":
+                clean_windows.append({**w, "stale": True, "asOf": w.get("asOf") or account.get("last_synced") or ""})
+                stale["windows"] = True
 
-    # Sort deduplicated models list with Gemini 4 Argon first
-    sorted_models = sorted(
-        models_by_id.values(),
-        key=lambda m: (
-            0 if "argon" in m["modelId"].lower() else 1,
-            MODEL_SORT_PRIORITY.index(m["modelId"]) if m["modelId"] in MODEL_SORT_PRIORITY else 999,
-            m["label"],
-        ),
-    )
+    account["quota_windows"] = clean_windows
 
-    if clean_windows:
-        account["quota_windows"] = clean_windows
-    if sorted_models:
+    # 8. Per-model list: replace on success, otherwise keep the previous list flagged stale
+    if models_ok:
+        sorted_models = sorted(
+            models_by_id.values(),
+            key=lambda m: (
+                0 if "argon" in str(m["modelId"]).lower() else 1,
+                _MODEL_PRIORITY_INDEX.get(canonical_model_key(m["modelId"]), 999),
+                m["label"],
+            ),
+        )
         account["models"] = sorted_models
         account["models_count"] = len(sorted_models)
-        account["active_models_count"] = sum(1 for m in sorted_models if m.get("remainingExactPct", m.get("remainingPct", 0)) > 0)
-    account["status"] = "Degraded" if (quota_err and not clean_windows) else "Enabled"
-    account["last_synced"] = datetime.datetime.now(datetime.timezone.utc).isoformat()
-    account["last_error"] = quota_err if not clean_windows else None
-    return account
+        account["active_models_count"] = sum(
+            1 for m in sorted_models if m.get("remainingExactPct", m.get("remainingPct", 0)) > 0
+        )
+        account["models_synced"] = now_iso
+    elif account.get("models"):
+        stale["models"] = True
+
+    return _finish()
+
+
+def _merge_language_server_status(account: dict, models_by_id: dict, seen_display_names: dict,
+                                  ls_info: dict | None, merge_models: bool = True):
+    """Enrich the active account with GetUserStatus credits and any LS-only models."""
+    if ls_info is None:
+        ls_info = discover_language_server()
+    if not ls_info:
+        return
+    ustatus = call_ls_rpc("GetUserStatus", {}, ls_info)
+    if not ustatus or not isinstance(ustatus.get("userStatus"), dict):
+        return
+    us = ustatus["userStatus"]
+    if us.get("profilePictureUrl"):
+        account["picture_data_uri"] = us["profilePictureUrl"]
+    pstatus = us.get("planStatus") or {}
+    pinfo = pstatus.get("planInfo") or {}
+    account["prompt_credits_available"] = pstatus.get("availablePromptCredits", 0)
+    account["flow_credits_available"] = pstatus.get("availableFlowCredits", 0)
+    account["monthly_prompt_credits"] = pinfo.get("monthlyPromptCredits", 50000)
+    account["monthly_flow_credits"] = pinfo.get("monthlyFlowCredits", 150000)
+    account["plan_tier_badge"] = pinfo.get("planName", account.get("plan_name", "Pro"))
+    if (us.get("userTier") or {}).get("name"):
+        account["plan_name"] = us["userTier"]["name"]
+    if not merge_models:
+        return
+
+    cmodels = (us.get("cascadeModelConfigData") or {}).get("clientModelConfigs") or []
+    for cm in cmodels:
+        if not isinstance(cm, dict):
+            continue
+        lbl = (cm.get("label") or "").strip()
+        if not lbl:
+            continue
+        norm_lbl = lbl.lower()
+        existing_mid = seen_display_names.get(norm_lbl)
+        mid = existing_mid or cm.get("modelId") or norm_lbl.replace(" ", "-")
+        prev = models_by_id.get(mid, {})
+        if prev:
+            # Preserve exact live CloudCode fraction from fetchAvailableModels, only enrich tag if missing
+            if cm.get("tagTitle") and not prev.get("tag"):
+                prev["tag"] = cm["tagTitle"]
+            continue
+        models_by_id[mid] = {
+            "modelId": mid,
+            "label": lbl,
+            **_quota_fields(cm.get("quotaInfo")),
+            "maxTokens": _safe_int(cm.get("maxTokens"), 1048576),
+            "maxOutputTokens": _safe_int(cm.get("maxOutputTokens"), 65536),
+            "supportsThinking": True,
+            "supportsImages": True,
+            "tag": cm.get("tagTitle", ""),
+        }
+        seen_display_names[norm_lbl] = mid
 
 
 # ---------------------------------------------------------------------------
@@ -1211,6 +1466,11 @@ class AccountHub:
             "autoRefreshIntervalSec": 120,
         }
         self.pending_oauth: dict = {}
+        self._poll_locks: dict[str, threading.Lock] = {}
+        self._syncing: set[str] = set()
+        self._refresh_all_lock = threading.Lock()
+        self._last_refresh_all_mono = 0.0
+        self._last_refresh_all_iso = ""
         self._load()
         self.import_active_wincred_account()
 
@@ -1301,31 +1561,131 @@ class AccountHub:
                 create_snapshot("Initial Instance Baseline (Auto-Saved)", tag="baseline")
             return new_acc
 
-    def refresh_all_accounts(self) -> list[dict]:
-        """Poll live quota & model telemetry for all stored accounts in parallel."""
+    def poll_account(self, account_id: str, active_email: str | None = None, ls_info: dict | None = None) -> bool:
+        """
+        Poll one account without ever exposing a half-updated record.
+        The network work runs on a private copy with no hub lock held; the result is swapped
+        in under the lock, so save() and /api/state never see (or serialize) a dict that is
+        being mutated by a poll thread. Concurrent polls of the same account are coalesced.
+        """
+        with self.lock:
+            plock = self._poll_locks.setdefault(account_id, threading.Lock())
+        if not plock.acquire(blocking=False):
+            # Another thread is already polling this account: wait for its result instead of
+            # racing a second token refresh / poll against it.
+            with plock:
+                return True
+        try:
+            with self.lock:
+                live = next((a for a in self.accounts if a.get("id") == account_id), None)
+                if live is None:
+                    return False
+                snapshot = copy.deepcopy(live)
+                self._syncing.add(account_id)
+            orig_tok = dict(snapshot.get("token") or {})
+            try:
+                poll_account_telemetry(snapshot, active_email=active_email, ls_info=ls_info)
+            except Exception as e:
+                # Unexpected bug in the poll itself: record it on the account instead of losing it
+                log_error(f"poll_account({snapshot.get('email')})", e)
+                snapshot = copy.deepcopy(live)
+                prev = snapshot.get("sync") if isinstance(snapshot.get("sync"), dict) else {}
+                snapshot["sync"] = {
+                    "state": "failed",
+                    "errors": [{"step": "internal", "message": f"{type(e).__name__}: {e}"}],
+                    "stale": {k: True for k in ("argon", "windows", "models")},
+                    "lastAttempt": _utc_now_iso(),
+                    "lastSuccess": prev.get("lastSuccess") or snapshot.get("last_synced") or "",
+                    "consecutiveFailures": int(prev.get("consecutiveFailures") or 0) + 1,
+                }
+                snapshot["status"] = "Sync Error"
+                snapshot["last_error"] = f"internal: {type(e).__name__}: {e}"
+            with self.lock:
+                live = next((a for a in self.accounts if a.get("id") == account_id), None)
+                if live is None:
+                    return False  # removed while polling
+                live_tok = live.get("token") or {}
+                # A re-login / WinCred import may have replaced the token mid-poll: keep the newer one
+                token_replaced = (
+                    live_tok.get("refresh_token") != orig_tok.get("refresh_token")
+                    or live_tok.get("access_token") != orig_tok.get("access_token")
+                )
+                live.clear()
+                live.update(snapshot)
+                if token_replaced:
+                    live["token"] = live_tok
+                self.save()
+            return True
+        finally:
+            with self.lock:
+                self._syncing.discard(account_id)
+            plock.release()
+
+    def refresh_accounts(self, account_ids: list[str] | None = None, wait_sec: float = ACCOUNT_POLL_BUDGET_SEC + 15) -> list[dict]:
+        """
+        Poll the given accounts (all when None) in parallel, one thread each, so one slow or
+        failing account never blocks the others. Returns once every poll finished or wait_sec
+        elapsed; accounts still running are reported with syncing=True and finish in the background.
+        """
         active_email = self.get_active_wincred_email()
         ls_info = discover_language_server()
-        threads = []
-
-        def _worker(acc):
-            try:
-                poll_account_telemetry(acc, active_email=active_email, ls_info=ls_info)
-            except Exception as e:
-                acc["last_error"] = str(e)
-
         with self.lock:
-            target_list = list(self.accounts)
+            ids = [a.get("id") for a in self.accounts if a.get("id")]
+        if account_ids is not None:
+            wanted = set(account_ids)
+            ids = [i for i in ids if i in wanted]
 
-        for acc in target_list:
-            t = threading.Thread(target=_worker, args=(acc,), daemon=True)
+        threads = []
+        for acc_id in ids:
+            t = threading.Thread(target=self.poll_account, args=(acc_id, active_email, ls_info), daemon=True)
             t.start()
             threads.append(t)
-
+        join_deadline = time.monotonic() + wait_sec
         for t in threads:
-            t.join(timeout=12)
-
-        self.save()
+            t.join(timeout=max(0.0, join_deadline - time.monotonic()))
         return self.get_enriched_accounts()
+
+    def refresh_all_accounts(self) -> list[dict]:
+        """Poll live quota & model telemetry for all stored accounts in parallel."""
+        if not self._refresh_all_lock.acquire(blocking=False):
+            # A full refresh is already running (auto-refresh or another tab): share its result
+            with self._refresh_all_lock:
+                return self.get_enriched_accounts()
+        try:
+            return self.refresh_accounts(None)
+        finally:
+            self._last_refresh_all_mono = time.monotonic()
+            self._last_refresh_all_iso = _utc_now_iso()
+            self._refresh_all_lock.release()
+
+    def get_hub_status(self) -> dict:
+        try:
+            interval = int(self.settings.get("autoRefreshIntervalSec", 120) or 0)
+        except (TypeError, ValueError):
+            interval = 120
+        return {
+            "refreshingAll": self._refresh_all_lock.locked(),
+            "autoRefreshIntervalSec": interval,
+            "lastRefreshAll": self._last_refresh_all_iso,
+            "serverTime": _utc_now_iso(),
+        }
+
+    def auto_refresh_loop(self, stop_event: threading.Event | None = None, tick_sec: float = 5.0):
+        """
+        Background sync: re-poll every account each autoRefreshIntervalSec (0 disables).
+        Without this, quotas were only fetched once at startup and on manual clicks, so the
+        dashboard kept showing whatever Argon value it had cached.
+        """
+        stop_event = stop_event or threading.Event()
+        while not stop_event.wait(tick_sec):
+            try:
+                interval = self.get_hub_status()["autoRefreshIntervalSec"]
+                if interval <= 0:
+                    continue
+                if time.monotonic() - self._last_refresh_all_mono >= max(30, interval):
+                    self.refresh_all_accounts()
+            except Exception as e:
+                log_error("auto_refresh_loop", e)
 
     def get_enriched_accounts(self) -> list[dict]:
         active_email = (self.get_active_wincred_email() or "").lower()
@@ -1334,10 +1694,11 @@ class AccountHub:
             for acc in self.accounts:
                 c = dict(acc)
                 # Strip raw tokens from frontend response for cleanliness, keep metadata
-                tok = c.pop("token", {})
+                tok = c.pop("token", None) or {}
                 c["hasRefreshToken"] = bool(tok.get("refresh_token"))
                 c["tokenExpiry"] = tok.get("expiry", "")
-                c["isActive"] = (c.get("email", "").lower() == active_email)
+                c["isActive"] = bool(active_email) and (c.get("email", "").lower() == active_email)
+                c["syncing"] = c.get("id") in self._syncing
                 result.append(c)
             return result
 
@@ -1528,10 +1889,9 @@ class AccountHub:
 
         # Poll telemetry immediately for the newly connected account
         try:
-            poll_account_telemetry(acc, active_email=self.get_active_wincred_email())
-            self.save()
-        except Exception:
-            pass
+            self.poll_account(acc["id"], active_email=self.get_active_wincred_email())
+        except Exception as e:
+            log_error(f"initial_poll({email})", e)
 
         return acc
 
@@ -1646,9 +2006,20 @@ class HubRequestHandler(http.server.BaseHTTPRequestHandler):
                     self._send_html(self._render_oauth_result(False, err_str), 500)
                 return
 
+            if path == "/api/accounts":
+                # Lightweight poll target for in-place UI refresh (no disk / sqlite reads)
+                self._send_json({
+                    "ok": True,
+                    "accounts": HUB.get_enriched_accounts(),
+                    "activeEmail": HUB.get_active_wincred_email(),
+                    "hub": HUB.get_hub_status(),
+                })
+                return
+
             if path == "/api/state":
                 ls_info = discover_language_server()
                 self._send_json({
+                    "hub": HUB.get_hub_status(),
                     "accounts": HUB.get_enriched_accounts(),
                     "activeEmail": HUB.get_active_wincred_email(),
                     "languageServer": {
@@ -1687,23 +2058,28 @@ class HubRequestHandler(http.server.BaseHTTPRequestHandler):
 
         try:
             if path == "/api/accounts/refresh":
-                acc_id = body.get("accountId")
-                if acc_id:
-                    with HUB.lock:
-                        target = next((a for a in HUB.accounts if a["id"] == acc_id), None)
-                    if not target:
-                        self._send_json({"ok": False, "error": f"Account {acc_id} not found"}, 404)
+                ids = body.get("accountIds")
+                if body.get("accountId"):
+                    ids = [body["accountId"]]
+                if ids is not None:
+                    if not isinstance(ids, list) or not ids:
+                        self._send_json({"ok": False, "error": "accountIds must be a non-empty list"}, 400)
                         return
-                    poll_account_telemetry(
-                        target,
-                        active_email=HUB.get_active_wincred_email(),
-                        ls_info=discover_language_server(),
-                    )
-                    HUB.save()
-                    accounts = HUB.get_enriched_accounts()
+                    with HUB.lock:
+                        known = {a.get("id") for a in HUB.accounts}
+                    missing = [i for i in ids if i not in known]
+                    if missing:
+                        self._send_json({"ok": False, "error": f"Account {missing[0]} not found"}, 404)
+                        return
+                    accounts = HUB.refresh_accounts(ids)
                 else:
                     accounts = HUB.refresh_all_accounts()
-                self._send_json({"ok": True, "accounts": accounts, "activeEmail": HUB.get_active_wincred_email()})
+                self._send_json({
+                    "ok": True,
+                    "accounts": accounts,
+                    "activeEmail": HUB.get_active_wincred_email(),
+                    "hub": HUB.get_hub_status(),
+                })
                 return
 
             if path == "/api/accounts/add-oauth":
@@ -1751,8 +2127,7 @@ class HubRequestHandler(http.server.BaseHTTPRequestHandler):
                         }
                         HUB.accounts.append(acc)
                     HUB.save()
-                poll_account_telemetry(acc, active_email=HUB.get_active_wincred_email())
-                HUB.save()
+                HUB.poll_account(acc["id"], active_email=HUB.get_active_wincred_email())
                 self._send_json({"ok": True, "accounts": HUB.get_enriched_accounts()})
                 return
 
@@ -1964,8 +2339,9 @@ def main():
         log_error("bind_http_server", f"Could not bind 127.0.0.1:{port}: {e}")
         raise
 
-    # Initial background telemetry refresh
+    # Initial background telemetry refresh, then keep re-syncing on the configured interval
     threading.Thread(target=HUB.refresh_all_accounts, daemon=True).start()
+    threading.Thread(target=HUB.auto_refresh_loop, daemon=True).start()
 
     if "--no-window" not in sys.argv:
         launch_gui_window(url)
