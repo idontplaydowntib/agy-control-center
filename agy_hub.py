@@ -10,6 +10,7 @@ import ctypes
 from ctypes import wintypes
 import datetime
 import hashlib
+import html
 import http.server
 import json
 import os
@@ -250,14 +251,33 @@ def _spawn_hidden(cmd: list[str]) -> subprocess.Popen | None:
 def _atomic_write_json(target_path: Path, payload: dict | list, backup_path: Path | None = None):
     """Write JSON atomically via temp file + os.replace to prevent any save corruption."""
     raw = json.dumps(payload, indent=2, ensure_ascii=False)
-    tmp_path = target_path.with_suffix(target_path.suffix + ".tmp")
-    tmp_path.write_text(raw, encoding="utf-8")
-    if backup_path and target_path.exists():
+    # Per-process/per-thread temp name so two concurrent writers can never share (and truncate) one temp file
+    tmp_path = target_path.with_name(f"{target_path.name}.{os.getpid()}.{threading.get_ident()}.tmp")
+    try:
+        with open(tmp_path, "w", encoding="utf-8") as f:
+            f.write(raw)
+            f.flush()
+            os.fsync(f.fileno())
+        if backup_path and target_path.exists():
+            try:
+                shutil.copy2(target_path, backup_path)
+            except Exception as e:
+                log_error("backup_copy", e)
+        # On Windows os.replace fails with PermissionError while AV/indexer/another reader holds the target
+        for attempt in range(6):
+            try:
+                os.replace(tmp_path, target_path)
+                break
+            except PermissionError:
+                if attempt == 5:
+                    raise
+                time.sleep(0.05 * (attempt + 1))
+    finally:
         try:
-            shutil.copy2(target_path, backup_path)
-        except Exception as e:
-            log_error("backup_copy", e)
-    os.replace(tmp_path, target_path)
+            if tmp_path.exists():
+                tmp_path.unlink()
+        except OSError:
+            pass
 
 
 # ---------------------------------------------------------------------------
@@ -1138,8 +1158,11 @@ def list_snapshots() -> list[dict]:
 
 def restore_snapshot(snap_id: str, preserve_login_email: str | None = None) -> bool:
     """Restore a saved snapshot back into live Antigravity directories without losing active login."""
+    # snap_id comes from the request body: reject empty ids (would resolve to the vault root) and path traversal
+    if not isinstance(snap_id, str) or not re.fullmatch(r"snap_[A-Za-z0-9_]+", snap_id):
+        return False
     snap_dir = SNAPSHOTS_DIR / snap_id
-    if not snap_dir.exists():
+    if not snap_dir.is_dir():
         return False
 
     if (snap_dir / "config.json").exists():
@@ -1147,9 +1170,11 @@ def restore_snapshot(snap_id: str, preserve_login_email: str | None = None) -> b
         shutil.copy2(snap_dir / "config.json", AGY_CONFIG_JSON)
 
     if (snap_dir / "mcp_config.json").exists():
+        AGY_MCP_JSON.parent.mkdir(parents=True, exist_ok=True)
         shutil.copy2(snap_dir / "mcp_config.json", AGY_MCP_JSON)
 
     if (snap_dir / "antigravity_state.pbtxt").exists():
+        AGY_STATE_PBTXT.parent.mkdir(parents=True, exist_ok=True)
         shutil.copy2(snap_dir / "antigravity_state.pbtxt", AGY_STATE_PBTXT)
 
     if (snap_dir / "projects").exists():
@@ -1158,13 +1183,15 @@ def restore_snapshot(snap_id: str, preserve_login_email: str | None = None) -> b
             shutil.copy2(pfile, AGY_PROJECTS_DIR / pfile.name)
 
     if (snap_dir / "app_storage.json").exists():
+        AGY_APP_STORAGE_JSON.parent.mkdir(parents=True, exist_ok=True)
         try:
             ast = json.loads((snap_dir / "app_storage.json").read_text(encoding="utf-8"))
             if preserve_login_email:
                 ast["jetski.onboarding.lastLoginUsername"] = preserve_login_email
                 ast["ide-install-wizard-shown"] = "true"
-            AGY_APP_STORAGE_JSON.write_text(json.dumps(ast, indent=2), encoding="utf-8")
-        except Exception:
+            _atomic_write_json(AGY_APP_STORAGE_JSON, ast)
+        except Exception as e:
+            log_error("restore_snapshot(app_storage)", e)
             shutil.copy2(snap_dir / "app_storage.json", AGY_APP_STORAGE_JSON)
 
     return True
@@ -1201,8 +1228,15 @@ class AccountHub:
                     if isinstance(raw, list):
                         loaded_accounts = raw
                         break
+                    log_error(f"load_accounts({candidate.name})", "top-level JSON value is not a list")
                 except Exception as e:
                     log_error(f"load_accounts({candidate.name})", e)
+                # Unreadable: keep a copy so the next save() cannot destroy the only recoverable data
+                try:
+                    stamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+                    shutil.copy2(candidate, candidate.with_name(f"{candidate.name}.corrupt-{stamp}"))
+                except Exception as e:
+                    log_error(f"preserve_corrupt({candidate.name})", e)
         if loaded_accounts is not None:
             self.accounts = loaded_accounts
 
@@ -1313,25 +1347,35 @@ class AccountHub:
         open session tabs, conversation history, or settings.
         """
         with self.lock:
-            target = next((a for a in self.accounts if a["id"] == account_id), None)
+            target = next((a for a in self.accounts if a.get("id") == account_id), None)
             if not target:
                 raise ValueError(f"Account {account_id} not found")
+            refresh_tok = (target.get("token") or {}).get("refresh_token", "")
 
-            # 1. Auto-snapshot current workspace & session state if enabled
-            if self.settings.get("autoSnapshotBeforeSwitch", True):
-                create_snapshot(f"Auto-Save before switching to {target['email']}", tag="auto")
+        # 1. Auto-snapshot current workspace & session state if enabled
+        if self.settings.get("autoSnapshotBeforeSwitch", True):
+            create_snapshot(f"Auto-Save before switching to {target['email']}", tag="auto")
 
-            # 2. Ensure fresh access token before writing to WinCred
-            tok = target.get("token", {})
-            if tok.get("refresh_token"):
-                try:
-                    fresh = refresh_google_token(tok["refresh_token"])
-                    tok["access_token"] = fresh["access_token"]
-                    tok["expiry"] = fresh["expiry"]
-                    tok["expires_in"] = fresh["expires_in"]
-                    target["token"] = tok
-                except Exception:
-                    pass
+        # 2. Ensure fresh access token before writing to WinCred. The network call runs
+        # outside the hub lock so /api/state is never blocked behind a slow token endpoint.
+        fresh = None
+        if refresh_tok:
+            try:
+                fresh = refresh_google_token(refresh_tok)
+            except Exception as e:
+                log_error(f"switch_refresh_token({target.get('email')})", format_http_error(e))
+
+        with self.lock:
+            tok = target.setdefault("token", {})
+            if fresh and tok.get("refresh_token") == refresh_tok:
+                tok["access_token"] = fresh["access_token"]
+                tok["expiry"] = fresh["expiry"]
+                tok["expires_in"] = fresh["expires_in"]
+            if not tok.get("access_token") or not tok.get("refresh_token"):
+                raise RuntimeError(
+                    f"{target.get('email')} has no usable OAuth token (refresh failed or the "
+                    "refresh token is missing). Re-add the account, then try again."
+                )
 
             # 3. Write credential payload to Windows Credential Manager (`gemini:antigravity`)
             wincred_payload = {
@@ -1339,7 +1383,7 @@ class AccountHub:
                     "access_token": tok["access_token"],
                     "token_type": tok.get("token_type", "Bearer"),
                     "refresh_token": tok["refresh_token"],
-                    "expiry": tok["expiry"],
+                    "expiry": tok.get("expiry", ""),
                     "expires_in": tok.get("expires_in", 3599),
                 },
                 "auth_method": target.get("auth_method", "consumer"),
@@ -1355,9 +1399,9 @@ class AccountHub:
                     ast["jetski.onboarding.lastLoginUsername"] = target["email"]
                     ast["jetski.onboarding.lastLoginIsGcpTos"] = "false"
                     ast["ide-install-wizard-shown"] = "true"
-                    AGY_APP_STORAGE_JSON.write_text(json.dumps(ast, indent=2), encoding="utf-8")
-                except Exception:
-                    pass
+                    _atomic_write_json(AGY_APP_STORAGE_JSON, ast)
+                except Exception as e:
+                    log_error("switch_update_app_storage", e)
 
             self.save()
 
@@ -1373,7 +1417,7 @@ class AccountHub:
     def remove_account(self, account_id: str) -> bool:
         with self.lock:
             before = len(self.accounts)
-            self.accounts = [a for a in self.accounts if a["id"] != account_id]
+            self.accounts = [a for a in self.accounts if a.get("id") != account_id]
             self.save()
             return len(self.accounts) < before
 
@@ -1500,7 +1544,9 @@ HUB = AccountHub()
 # ---------------------------------------------------------------------------
 class ThreadedHTTPServer(socketserver.ThreadingMixIn, http.server.HTTPServer):
     daemon_threads = True
-    allow_reuse_address = True
+    # On Windows SO_REUSEADDR lets a second process bind the *same* live port, so a double
+    # launch would leave two hubs sharing 17420 with requests split between them.
+    allow_reuse_address = os.name != "nt"
 
 
 class HubRequestHandler(http.server.BaseHTTPRequestHandler):
@@ -1541,12 +1587,36 @@ class HubRequestHandler(http.server.BaseHTTPRequestHandler):
             if length <= 0:
                 return {}
             raw = self.rfile.read(length).decode("utf-8", errors="replace")
-            return json.loads(raw) if raw else {}
+            data = json.loads(raw) if raw else {}
+            return data if isinstance(data, dict) else {}
         except Exception as e:
             log_error("_read_json_body", e)
             return {}
 
+    def _local_origins(self) -> set[str]:
+        port = self.server.server_address[1]
+        return {f"127.0.0.1:{port}", f"localhost:{port}"}
+
+    def _reject_foreign_request(self, is_write: bool) -> bool:
+        """
+        Binding to loopback does not stop other websites open in the user's browser from
+        reaching the hub. Refuse DNS-rebinding (foreign Host header) on every request, and
+        cross-site POSTs (foreign Origin) on every state-changing endpoint.
+        """
+        host = (self.headers.get("Host") or "").strip().lower()
+        if host not in self._local_origins():
+            self._send_json({"ok": False, "error": "Forbidden: unexpected Host header"}, 403)
+            return True
+        if is_write:
+            origin = self.headers.get("Origin")
+            if origin is not None and origin.strip().lower() not in {f"http://{h}" for h in self._local_origins()}:
+                self._send_json({"ok": False, "error": "Forbidden: cross-origin request"}, 403)
+                return True
+        return False
+
     def do_GET(self):
+        if self._reject_foreign_request(is_write=False):
+            return
         try:
             parsed = urllib.parse.urlparse(self.path)
             path = parsed.path
@@ -1609,6 +1679,8 @@ class HubRequestHandler(http.server.BaseHTTPRequestHandler):
             self._send_json({"ok": False, "error": err_str}, 500)
 
     def do_POST(self):
+        if self._reject_foreign_request(is_write=True):
+            return
         parsed = urllib.parse.urlparse(self.path)
         path = parsed.path
         body = self._read_json_body()
@@ -1646,13 +1718,16 @@ class HubRequestHandler(http.server.BaseHTTPRequestHandler):
                 return
 
             if path == "/api/accounts/import-token":
-                refresh_tok = body.get("refreshToken", "").strip()
+                refresh_tok = str(body.get("refreshToken") or "").strip()
                 if not refresh_tok:
                     self._send_json({"ok": False, "error": "Refresh token is required"}, 400)
                     return
                 new_tok = refresh_google_token(refresh_tok)
                 uinfo = fetch_google_userinfo(new_tok["access_token"])
                 email = uinfo.get("email", "")
+                if not email:
+                    self._send_json({"ok": False, "error": "Google did not return an email address for this token"}, 400)
+                    return
                 with HUB.lock:
                     existing = next((a for a in HUB.accounts if a.get("email", "").lower() == email.lower()), None)
                     if existing:
@@ -1714,9 +1789,16 @@ class HubRequestHandler(http.server.BaseHTTPRequestHandler):
 
             if path == "/api/settings/update":
                 with HUB.lock:
-                    for k in ("pinWorkspacesOnSwitch", "autoSnapshotBeforeSwitch", "hotReloadLanguageServer", "autoRefreshIntervalSec"):
+                    for k in ("pinWorkspacesOnSwitch", "autoSnapshotBeforeSwitch", "hotReloadLanguageServer"):
                         if k in body:
-                            HUB.settings[k] = body[k]
+                            HUB.settings[k] = bool(body[k])
+                    if "autoRefreshIntervalSec" in body:
+                        try:
+                            sec = int(body["autoRefreshIntervalSec"])
+                        except (TypeError, ValueError):
+                            sec = 120
+                        # 0 disables auto-refresh; otherwise keep it between 30s and 1h
+                        HUB.settings["autoRefreshIntervalSec"] = 0 if sec <= 0 else max(30, min(sec, 3600))
                     HUB.save()
                 self._send_json({"ok": True, "settings": HUB.settings})
                 return
@@ -1732,7 +1814,7 @@ class HubRequestHandler(http.server.BaseHTTPRequestHandler):
                     )
                     self._send_json({"ok": True})
                 else:
-                    self._send_json({"ok": False, "error": f"Executable not found at {AGY_EXE_PATH}"}, 404)
+                    self._send_json({"ok": False, "error": f"Executable not found at {sanitize_local_path(AGY_EXE_PATH)}"}, 404)
                 return
 
             self._send_json({"ok": False, "error": "Unknown endpoint"}, 404)
@@ -1742,6 +1824,10 @@ class HubRequestHandler(http.server.BaseHTTPRequestHandler):
             self._send_json({"ok": False, "error": err_str}, 500)
 
     def _render_oauth_result(self, success: bool, title_or_email: str, name: str = "", plan: str = "") -> str:
+        # Values come from the query string / Google profile: escape before embedding in HTML
+        title_or_email = html.escape(str(title_or_email))
+        name = html.escape(str(name))
+        plan = html.escape(str(plan))
         color = "#10b981" if success else "#ef4444"
         badge = "ACCOUNT CONNECTED & VERIFIED" if success else "AUTHENTICATION FAILED"
         sub = (
@@ -1855,8 +1941,6 @@ def main():
             return
         else:
             # Stale/hung process holding port — terminate it via ctypes and take over
-            for pid in range(4, 262144, 4):
-                pass
             try:
                 size = wintypes.DWORD(0)
                 _iphlpapi.GetExtendedTcpTable(None, ctypes.byref(size), False, 2, 3, 0)
@@ -1873,10 +1957,15 @@ def main():
             except Exception as e:
                 log_error("kill_stale_port_owner", e)
 
+    try:
+        server = ThreadedHTTPServer(("127.0.0.1", port), HubRequestHandler)
+    except OSError as e:
+        # Under pythonw.exe there is no console: without this the app would just never appear
+        log_error("bind_http_server", f"Could not bind 127.0.0.1:{port}: {e}")
+        raise
+
     # Initial background telemetry refresh
     threading.Thread(target=HUB.refresh_all_accounts, daemon=True).start()
-
-    server = ThreadedHTTPServer(("127.0.0.1", port), HubRequestHandler)
 
     if "--no-window" not in sys.argv:
         launch_gui_window(url)
